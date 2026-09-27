@@ -27,6 +27,14 @@ cat > "$TEST_DIR/system/etc/selinux/plat_file_contexts" <<'EOF'
 /.+ u:object_r:system_file:s0
 EOF
 
+# Real extracted Android trees often contain root-owned private directories.
+# Keep this fixture owned by root so the test proves the e2fsdroid invocation
+# uses sudo when the build runner cannot read every source path.
+sudo mkdir -p "$TEST_DIR/system/data/private"
+sudo touch "$TEST_DIR/system/data/private/root-owned-marker"
+sudo chown -R root:root "$TEST_DIR/system/data"
+sudo chmod 700 "$TEST_DIR/system/data"
+
 pushd "$TEST_DIR" >/dev/null
 bash "$ROOT_DIR/scripts/repack_gsi.sh" "$TEST_DIR/system" repack-smoke ext4
 popd >/dev/null

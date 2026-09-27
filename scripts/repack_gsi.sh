@@ -82,6 +82,18 @@ else
   # passes a filesystem check but bootloops at init/zygote.
   if command -v e2fsdroid >/dev/null 2>&1; then
     echo "==> [REPACK] Populating ext4 with Android e2fsdroid metadata..."
+    E2FSDROID_CMD=(e2fsdroid)
+    # Extracted Android trees commonly contain root-owned, mode-0700 paths
+    # (for example data/). The runner user can create the image but cannot
+    # read those paths unless the metadata tool is elevated. The wrapper sets
+    # its own library path, so sudo does not need to preserve the environment.
+    if [ "$(id -u)" -ne 0 ]; then
+      if ! command -v sudo >/dev/null 2>&1; then
+        echo "[-] ERROR: e2fsdroid requires sudo to read root-owned Android paths." >&2
+        exit 1
+      fi
+      E2FSDROID_CMD=(sudo e2fsdroid)
+    fi
     FILE_CONTEXTS=""
     while IFS= read -r candidate; do
       if [ -f "$candidate" ]; then
@@ -109,7 +121,7 @@ else
     else
       echo "  [!] No text file_contexts found; preserving source metadata without relabeling"
     fi
-    e2fsdroid "${E2FSDROID_ARGS[@]}" "$RAW_IMG"
+    "${E2FSDROID_CMD[@]}" "${E2FSDROID_ARGS[@]}" "$RAW_IMG"
   else
     echo "  [!] e2fsdroid unavailable; using mounted cp fallback"
     MNT_POINT="$WORK_DIR/mnt_repack"
