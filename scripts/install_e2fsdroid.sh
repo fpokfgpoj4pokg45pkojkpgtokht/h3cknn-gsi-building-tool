@@ -30,6 +30,8 @@ PRIMARY_E2FSDROID_SHA256="ca8b1bd989718b62f670381b3ef245276becc9a4a919e50e96948f
 FALLBACK_E2FSDROID_SHA256="a56dbdb9f19a5be79f3de5914ad576d938fc497429d36dc476ed223d2049a81f"
 PLATFORM_TOOLS_E2FSDROID_URL="https://android.googlesource.com/platform/prebuilts/fullsdk-linux/platform-tools/+/83a183b4bced4377eb5817074db82885cfcae393/e2fsdroid?format=TEXT"
 PLATFORM_TOOLS_E2FSDROID_SHA256="9c11ea7840cfd14322d750a3fa1f2c2821969466c3ac8fe67c09da6dc6937dfd"
+COMMUNITY_E2FSDROID_URL="https://raw.githubusercontent.com/rendiix/termux-adb-fastboot/4ba03b2422a50f626eae58f99977bef0424020a1/binary/x86_64/bin/e2fsdroid"
+COMMUNITY_E2FSDROID_SHA256="46cea438fad6b0943742d239988dcd69272e0f593313976f4e05a7119907774e"
 
 E2FSDROID_URLS=(
   "https://android.googlesource.com/kernel/prebuilts/build-tools/+/$PRIMARY_COMMIT/linux-x86/bin/e2fsdroid?format=TEXT"
@@ -57,6 +59,21 @@ download_aosp_blob() {
     --connect-timeout 30 --max-time 180 \
     "$url" -o "$encoded" || return 1
   base64 --decode "$encoded" > "$destination" || return 1
+  [ -s "$destination" ] || return 1
+  printf '%s  %s\n' "$sha256" "$destination" \
+    | sha256sum --check --status || return 1
+}
+
+download_raw_blob() {
+  local url="$1"
+  local destination="$2"
+  local sha256="$3"
+
+  rm -f -- "$destination"
+  curl --fail --silent --show-error --location \
+    --retry 5 --retry-all-errors --retry-delay 5 \
+    --connect-timeout 30 --max-time 180 \
+    "$url" -o "$destination" || return 1
   [ -s "$destination" ] || return 1
   printf '%s  %s\n' "$sha256" "$destination" \
     | sha256sum --check --status || return 1
@@ -124,6 +141,26 @@ if [ "$BUNDLE_READY" != "1" ]; then
     if tool_starts "$BUNDLE_DIR/e2fsdroid"; then
       BUNDLE_READY=1
       echo "  [+] official AOSP platform-tools fallback is executable"
+    fi
+  fi
+fi
+
+# Last resort for a temporary outage of the official AOSP Gitiles service.
+# This is a single checksum-pinned executable from a fixed upstream commit; no
+# third-party shared libraries are accepted. The health check must succeed
+# before it can replace the metadata-preserving build path.
+if [ "$BUNDLE_READY" != "1" ]; then
+  echo "  -> Trying checksum-pinned community e2fsdroid fallback..."
+  rm -rf -- "$BUNDLE_DIR"
+  mkdir -p "$BUNDLE_DIR/lib64"
+  if download_raw_blob \
+    "$COMMUNITY_E2FSDROID_URL" \
+    "$BUNDLE_DIR/e2fsdroid" \
+    "$COMMUNITY_E2FSDROID_SHA256"; then
+    chmod 0755 "$BUNDLE_DIR/e2fsdroid"
+    if tool_starts "$BUNDLE_DIR/e2fsdroid"; then
+      BUNDLE_READY=1
+      echo "  [+] checksum-pinned community e2fsdroid is executable"
     fi
   fi
 fi
