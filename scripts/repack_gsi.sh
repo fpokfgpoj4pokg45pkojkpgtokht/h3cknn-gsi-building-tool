@@ -94,7 +94,15 @@ else
       -name 'vendor_file_contexts' \
     \) -print 2>/dev/null | sort)
 
-    E2FSDROID_ARGS=(-e -f "$SYSTEM_ROOT" -a /system)
+    # Context files from a mounted system partition commonly use /system as
+    # their namespace, while minimal or already-rooted context files use /. If
+    # the file does not contain an explicit /system rule, using / keeps
+    # e2fsdroid from rejecting the image root as unlabeled.
+    CONTEXT_MOUNTPOINT="/"
+    if grep -Eq '^[[:space:]]*/system([/(]|[[:space:]])' "$FILE_CONTEXTS"; then
+      CONTEXT_MOUNTPOINT="/system"
+    fi
+    E2FSDROID_ARGS=(-e -f "$SYSTEM_ROOT" -a "$CONTEXT_MOUNTPOINT")
     if [ -n "$FILE_CONTEXTS" ]; then
       echo "  -> SELinux file contexts: $FILE_CONTEXTS"
       E2FSDROID_ARGS+=(-S "$FILE_CONTEXTS")
