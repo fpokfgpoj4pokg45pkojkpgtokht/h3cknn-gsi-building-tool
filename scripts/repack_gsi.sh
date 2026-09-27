@@ -84,7 +84,7 @@ else
     echo "==> [REPACK] Populating ext4 with Android e2fsdroid metadata..."
     FILE_CONTEXTS=""
     while IFS= read -r candidate; do
-      if file -b "$candidate" 2>/dev/null | grep -Eiq 'text|ascii'; then
+      if [ -f "$candidate" ]; then
         FILE_CONTEXTS="$candidate"
         break
       fi
@@ -122,8 +122,18 @@ else
 
   # Shrink image to minimum size to save space
   echo "==> [REPACK] Optimizing filesystem size..."
-  e2fsck -fy "$RAW_IMG" || true
-  resize2fs -M "$RAW_IMG" || true
+  E2FSCK_STATUS=0
+  e2fsck -fy "$RAW_IMG" || E2FSCK_STATUS=$?
+  # e2fsck returns 1 when it repaired a filesystem successfully; higher
+  # statuses indicate an operational or uncorrected filesystem error.
+  if [ "$E2FSCK_STATUS" -gt 1 ]; then
+    echo "[-] ERROR: ext4 filesystem verification failed (status: $E2FSCK_STATUS)." >&2
+    exit 1
+  fi
+  if ! resize2fs -M "$RAW_IMG"; then
+    echo "[-] ERROR: Could not safely minimize the ext4 filesystem image." >&2
+    exit 1
+  fi
 
   echo "==> [REPACK] Converting to Android Sparse Image (img2simg)..."
   if command -v img2simg &>/dev/null; then
