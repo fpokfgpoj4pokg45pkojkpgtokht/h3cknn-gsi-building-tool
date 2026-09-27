@@ -106,7 +106,7 @@ jobs:
             workspace/output \
             "$OUTPUT_NAME_INPUT"
           cd workspace/output
-          find . -maxdepth 1 -type f \( -name '*.tar' -o -name '*.tar.md5' -o -name '*.img' -o -name '*.img.lz4' -o -name '*.build-info.txt' \) -print0 \
+          find . -maxdepth 1 -type f \( -name '*.tar' -o -name '*.tar.md5' -o -name '*.img' -o -name '*.img.lz4' -o -name '*.build-info.txt' -o -name '*.compatibility-report.txt' \) -print0 \
             | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
 
       - name: Upload package artifact
@@ -120,6 +120,7 @@ jobs:
             workspace/output/super.img.lz4
             workspace/output/*.img.lz4
             workspace/output/*.build-info.txt
+            workspace/output/*.compatibility-report.txt
             workspace/output/SHA256SUMS.txt
           retention-days: 14
 
@@ -151,6 +152,7 @@ jobs:
             workspace/output/super.img.lz4
             workspace/output/*.img.lz4
             workspace/output/*.build-info.txt
+            workspace/output/*.compatibility-report.txt
             workspace/output/SHA256SUMS.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

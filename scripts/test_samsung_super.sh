@@ -23,6 +23,24 @@ mke2fs -t ext4 -F -L vendor "$TEST_DIR/vendor.img" >/dev/null
 mke2fs -t ext4 -F -L product "$TEST_DIR/product.img" >/dev/null
 mke2fs -t ext4 -F -L system "$TEST_DIR/gsi.img" >/dev/null
 
+# Give the integration test real system/vendor properties so the package path
+# exercises the SDK/VNDK/ABI compatibility comparison instead of only testing
+# the no-metadata fallback.
+cat > "$TEST_DIR/gsi-build.prop" <<'EOF'
+ro.build.version.sdk=35
+ro.vndk.version=35
+ro.product.cpu.abilist=arm64-v8a,armeabi-v7a,armeabi
+EOF
+cat > "$TEST_DIR/vendor-build.prop" <<'EOF'
+ro.vendor.build.version.sdk=34
+ro.vndk.version=34
+ro.vendor.product.cpu.abilist64=arm64-v8a
+EOF
+debugfs -w -R "write $TEST_DIR/gsi-build.prop /build.prop" \
+  "$TEST_DIR/gsi.img" >/dev/null 2>&1
+debugfs -w -R "write $TEST_DIR/vendor-build.prop /build.prop" \
+  "$TEST_DIR/vendor.img" >/dev/null 2>&1
+
 # Build a small sparse stock super with three logical partitions.
 lpmake \
   --metadata-size 65536 \
@@ -49,6 +67,8 @@ SAMSUNG_DEVICE_MODEL=SM-TEST \
 
 [ -s "$TEST_DIR/output/super.img" ]
 [ -s "$TEST_DIR/output/smoke-super-only.tar" ]
+[ -s "$TEST_DIR/output/smoke.compatibility-report.txt" ]
+grep -F 'Status: WARN' "$TEST_DIR/output/smoke.compatibility-report.txt" >/dev/null
 [ -s "$TEST_DIR/output/super.img.lz4" ]
 tar -tf "$TEST_DIR/output/smoke-super-only.tar" | grep -Fx 'super.img' >/dev/null
 test "$(od -An -tx1 -N5 "$TEST_DIR/output/super.img.lz4" | tr -d '[:space:]')" = 04224d186c

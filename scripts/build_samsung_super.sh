@@ -205,6 +205,41 @@ if ! python3 "$TOOLS_DIR/lpunpack.py" "$STOCK_IMAGE" "$PARTITION_DIR" >/dev/null
   exit 1
 fi
 
+# Compare the actual GSI system properties with the stock vendor partition
+# before building a device-specific package. This catches a confirmed ABI
+# clash and records SDK/VNDK mismatches that commonly become bootloops. Some
+# old or synthetic vendor images have no build.prop; those remain buildable
+# but are marked as unverified in the release report.
+VENDOR_COMPAT_REPORT="$OUTPUT_DIR/${OUTPUT_NAME}.compatibility-report.txt"
+GSI_PROP_PATH="$TEMP_DIR/gsi.build.prop"
+VENDOR_PROP_PATH="$TEMP_DIR/vendor.build.prop"
+VENDOR_IMAGE_PATH="$PARTITION_DIR/vendor.img"
+rm -f -- "$VENDOR_COMPAT_REPORT"
+if [ -f "$VENDOR_IMAGE_PATH" ] \
+  && bash "$SCRIPT_DIR/extract_build_prop_from_image.sh" \
+    "$GSI_IMAGE" "$GSI_PROP_PATH" "$TEMP_DIR/gsi-prop-work" >/dev/null 2>&1 \
+  && bash "$SCRIPT_DIR/extract_build_prop_from_image.sh" \
+    "$VENDOR_IMAGE_PATH" "$VENDOR_PROP_PATH" "$TEMP_DIR/vendor-prop-work" >/dev/null 2>&1; then
+  if ! bash "$SCRIPT_DIR/check_gsi_vendor_compatibility.sh" \
+    "$GSI_PROP_PATH" "$VENDOR_PROP_PATH" "$VENDOR_COMPAT_REPORT"; then
+    echo "[-] ERROR: GSI/vendor compatibility check rejected this package." >&2
+    exit 1
+  fi
+else
+  cat > "$VENDOR_COMPAT_REPORT" <<EOF
+GSI/vendor compatibility comparison
+=====================================
+Status: WARN
+Hard failures:
+none
+
+Warnings:
+- Could not extract build.prop from the GSI and/or stock vendor partition.
+- SDK, VNDK, ABI, kernel, DTB, AVB, and proprietary HAL compatibility remain unverified.
+EOF
+  echo "[!] GSI/vendor property comparison unavailable; package remains device-specific and unverified." >&2
+fi
+
 META_JSON="$TEMP_DIR/metadata.json"
 python3 "$TOOLS_DIR/lpunpack.py" --info --format json "$STOCK_IMAGE" \
   | tee "$META_JSON" >/dev/null || true
