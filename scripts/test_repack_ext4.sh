@@ -24,6 +24,7 @@ chmod 755 "$TEST_DIR/system/bin/init"
 # guarded mounted-copy fallback in repack_gsi.sh.
 cat > "$TEST_DIR/system/etc/selinux/plat_file_contexts" <<'EOF'
 / u:object_r:system_file:s0
+/.+ u:object_r:system_file:s0
 EOF
 
 pushd "$TEST_DIR" >/dev/null
