@@ -24,6 +24,7 @@ bash "$ROOT_DIR/scripts/check_gsi_vendor_compatibility.sh" \
 grep -Fx 'Status: WARN' "$TEST_DIR/report.txt" >/dev/null
 grep -F 'GSI SDK 35 is newer than target vendor SDK 34' "$TEST_DIR/report.txt" >/dev/null
 grep -F 'GSI VNDK 35 is newer than target vendor VNDK 34' "$TEST_DIR/report.txt" >/dev/null
+grep -F 'Vendor ABI64 list: arm64-v8a' "$TEST_DIR/report.txt" >/dev/null
 
 cat > "$TEST_DIR/arm64-vendor.prop" <<'EOF'
 ro.vendor.build.version.sdk=35

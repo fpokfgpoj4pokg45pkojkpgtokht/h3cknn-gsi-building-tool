@@ -147,8 +147,12 @@ warn "This comparison cannot validate the target kernel, DTB, boot ramdisk, AVB 
   printf 'Vendor VNDK: %s\n' "$VENDOR_VNDK"
   printf 'GSI VNDKLite: %s\n' "$GSI_VNDK_LITE"
   printf 'Vendor VNDKLite: %s\n' "$VENDOR_VNDK_LITE"
-  printf 'GSI ABI: %s\n' "$GSI_ABI_LIST"
-  printf 'Vendor ABI: %s\n' "$VENDOR_ABI_LIST"
+  printf 'GSI ABI list: %s\n' "$GSI_ABI_LIST"
+  printf 'GSI ABI64 list: %s\n' "$GSI_ABI64_LIST"
+  printf 'GSI ABI: %s\n' "$GSI_ABI"
+  printf 'Vendor ABI list: %s\n' "$VENDOR_ABI_LIST"
+  printf 'Vendor ABI64 list: %s\n' "$VENDOR_ABI64_LIST"
+  printf 'Vendor ABI: %s\n' "$VENDOR_ABI"
   printf '\nHard failures:\n'
   if [ "${#FAILURES[@]}" -eq 0 ]; then
     printf '%s\n' 'none'
