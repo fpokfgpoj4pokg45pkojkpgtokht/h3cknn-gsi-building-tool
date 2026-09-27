@@ -222,9 +222,17 @@ bash scripts/collect_boot_diagnostics.sh [adb-serial] boot-diagnostics
 ```
 
 The command is read-only and saves `getprop`, kernel/pstore logs, AVB and mount
-state, SELinux mode, overlays, all logcat buffers, and an optional bugreport.
+state, SELinux mode, overlays, all logcat buffers, an optional bugreport, and
+`boot-analysis.txt`. The analyzer classifies evidence into AVB/dm-verity,
+kernel/boot-chain, vendor HAL/VINTF, SELinux, filesystem, and storage failures:
+
+```bash
+bash scripts/analyze_boot_diagnostics.sh boot-diagnostics
+```
+
 The resulting directory can be compressed and attached to an issue. It cannot
-replace the exact device kernel/vendor/DTB boot chain.
+replace the exact device kernel/vendor/DTB boot chain or create universal
+drivers inside a system-only GSI.
 
 ### Fastboot-based devices
 
