@@ -41,6 +41,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends e2fsprogs
           bash scripts/test_direct_gsi_preflight.sh
+          bash scripts/test_preflight_gsi_against_vendor.sh
 
       - name: "📦 Direct and extensionless GSI preservation"
         run: |
