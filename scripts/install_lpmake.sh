@@ -63,141 +63,127 @@ else
   E2FSDROID_SHAS=("$PRIMARY_E2FSDROID_SHA256" "$FALLBACK_E2FSDROID_SHA256")
 fi
 TEMP_DIR="$(mktemp -d)"
-TEMP_FILE="$TEMP_DIR/lpmake"
 trap 'rm -rf -- "$TEMP_DIR"' EXIT
-
-echo "==> [SETUP] Installing verified AOSP lpmake..."
-LPMake_READY=0
-for i in "${!LPMake_URLS[@]}"; do
-  rm -f -- "$TEMP_DIR/lpmake.b64" "$TEMP_FILE"
-  echo "  -> Trying pinned AOSP lpmake source $((i + 1))/${#LPMake_URLS[@]}..."
-  if ! curl --fail --silent --show-error --location \
-    --retry 5 --retry-all-errors --retry-delay 5 \
-    --connect-timeout 30 --max-time 180 \
-    "${LPMake_URLS[$i]}" -o "$TEMP_DIR/lpmake.b64"; then
-    echo "  [!] lpmake source unavailable; trying the next pinned source" >&2
-    continue
-  fi
-  if [[ "${LPMake_URLS[$i]}" == *"format=TEXT"* ]]; then
-    if ! base64 --decode "$TEMP_DIR/lpmake.b64" > "$TEMP_FILE"; then
-      echo "  [!] lpmake source could not be decoded; trying the next pinned source" >&2
-      continue
-    fi
-  else
-    # GitHub's raw fallback is already an ELF binary, not AOSP's base64
-    # transport representation.
-    cp -- "$TEMP_DIR/lpmake.b64" "$TEMP_FILE"
-  fi
-  if [ ! -s "$TEMP_FILE" ]; then
-    echo "  [!] lpmake source was empty; trying the next pinned source" >&2
-    continue
-  fi
-  if [ -n "${LPMake_SHAS[$i]}" ] \
-    && ! printf '%s  %s\n' "${LPMake_SHAS[$i]}" "$TEMP_FILE" | sha256sum --check --status; then
-    echo "  [!] lpmake checksum mismatch; refusing this source" >&2
-    continue
-  fi
-  LPMake_READY=1
-  LPMake_SOURCE_INDEX="$i"
-  break
-done
-if [ "$LPMake_READY" != "1" ]; then
-  echo "[-] ERROR: No verified AOSP lpmake source could be downloaded." >&2
-  exit 1
-fi
 
 ANDROID_LIB_DIR="$(dirname "$(find -L /usr/lib -type f -path '*/android/libbase.so' -print -quit)")"
 if [ -z "$ANDROID_LIB_DIR" ] || [ "$ANDROID_LIB_DIR" = "." ]; then
   echo "[-] ERROR: Ubuntu Android library directory was not found." >&2
   exit 1
 fi
-echo "==> [SETUP] Installing matching AOSP lpmake libraries..."
-LIB_READY=0
-if [ "${#LIB_ARCHIVE_URLS[@]}" -eq 1 ]; then
-  LIB_INDICES=(0)
-elif [ "${LPMake_SOURCE_INDEX:-0}" = "1" ]; then
-  LIB_INDICES=(1 0)
-else
-  LIB_INDICES=(0 1)
-fi
-for i in "${LIB_INDICES[@]}"; do
-  rm -f -- "$TEMP_DIR/lib64.tar.gz"
-  rm -rf -- "$TEMP_DIR/lib64"
-  echo "  -> Trying matching AOSP library source $((i + 1))/${#LIB_ARCHIVE_URLS[@]}..."
-  if ! curl --fail --silent --show-error --location \
-    --retry 5 --retry-all-errors --retry-delay 5 \
-    --connect-timeout 30 --max-time 180 \
-    "${LIB_ARCHIVE_URLS[$i]}" -o "$TEMP_DIR/lib64.tar.gz"; then
-    echo "  [!] AOSP library source unavailable; trying the next pinned source" >&2
-    continue
-  fi
-  mkdir -p "$TEMP_DIR/lib64"
-  if ! tar -xzf "$TEMP_DIR/lib64.tar.gz" -C "$TEMP_DIR/lib64" \
-    || [ ! -f "$TEMP_DIR/lib64/liblp.so" ]; then
-    echo "  [!] AOSP library archive is invalid; trying the next pinned source" >&2
-    continue
-  fi
-  if [ -n "${LIB_LP_SHAS[$i]}" ] \
-    && ! printf '%s  %s\n' "${LIB_LP_SHAS[$i]}" "$TEMP_DIR/lib64/liblp.so" | sha256sum --check --status; then
-    echo "  [!] liblp.so checksum mismatch; refusing this source" >&2
-    continue
-  fi
-  LIB_READY=1
-  break
-done
-if [ "$LIB_READY" != "1" ]; then
-  echo "[-] ERROR: No verified AOSP lpmake library archive could be downloaded." >&2
-  exit 1
-fi
 
-echo "==> [SETUP] Installing verified AOSP e2fsdroid..."
-E2FSDROID_READY=0
-E2FSDROID_INDICES=()
-if [ "${LPMake_SOURCE_INDEX:-0}" = "1" ] && [ "${#E2FSDROID_URLS[@]}" -gt 1 ]; then
-  E2FSDROID_INDICES=(1 0)
-else
-  for i in "${!E2FSDROID_URLS[@]}"; do
-    E2FSDROID_INDICES+=("$i")
-  done
-fi
-for i in "${E2FSDROID_INDICES[@]}"; do
-  rm -f -- "$TEMP_DIR/e2fsdroid.b64" "$TEMP_DIR/e2fsdroid"
-  echo "  -> Trying pinned AOSP e2fsdroid source $((i + 1))/${#E2FSDROID_URLS[@]}..."
+download_aosp_blob() {
+  local url="$1"
+  local destination="$2"
+  local sha256="$3"
+  local encoded="$TEMP_DIR/download.b64"
+
+  rm -f -- "$encoded" "$destination"
   if ! curl --fail --silent --show-error --location \
     --retry 5 --retry-all-errors --retry-delay 5 \
     --connect-timeout 30 --max-time 180 \
-    "${E2FSDROID_URLS[$i]}" -o "$TEMP_DIR/e2fsdroid.b64"; then
-    echo "  [!] e2fsdroid source unavailable; trying the next pinned source" >&2
+    "$url" -o "$encoded"; then
+    return 1
+  fi
+  if [[ "$url" == *"format=TEXT"* ]]; then
+    base64 --decode "$encoded" > "$destination" || return 1
+  else
+    cp -- "$encoded" "$destination"
+  fi
+  [ -s "$destination" ] || return 1
+  if [ -n "$sha256" ]; then
+    printf '%s  %s\n' "$sha256" "$destination" \
+      | sha256sum --check --status || return 1
+  fi
+}
+
+tool_responds() {
+  local status=0
+  "$@" >/dev/null 2>&1 || status=$?
+  [ "$status" -eq 0 ] || [ "$status" -eq 1 ]
+}
+
+echo "==> [SETUP] Installing a matching verified AOSP image-tool bundle..."
+BUNDLE_READY=0
+BUNDLE_DIR="$TEMP_DIR/bundle"
+for i in "${!LPMake_URLS[@]}"; do
+  LIB_INDEX=0
+  E2FSDROID_INDEX=0
+  if [ "${#LIB_ARCHIVE_URLS[@]}" -gt 1 ]; then
+    LIB_INDEX="$i"
+  fi
+  if [ "${#E2FSDROID_URLS[@]}" -gt 1 ]; then
+    E2FSDROID_INDEX="$i"
+  fi
+  if [ "$LIB_INDEX" -ge "${#LIB_ARCHIVE_URLS[@]}" ] \
+    || [ "$E2FSDROID_INDEX" -ge "${#E2FSDROID_URLS[@]}" ]; then
     continue
   fi
-  if ! base64 --decode "$TEMP_DIR/e2fsdroid.b64" > "$TEMP_DIR/e2fsdroid"; then
-    echo "  [!] e2fsdroid source could not be decoded; trying the next pinned source" >&2
+
+  rm -rf -- "$BUNDLE_DIR"
+  mkdir -p "$BUNDLE_DIR/lib64"
+  echo "  -> Trying matching AOSP tool bundle $((i + 1))/${#LPMake_URLS[@]}..."
+
+  if ! download_aosp_blob \
+    "${LPMake_URLS[$i]}" \
+    "$BUNDLE_DIR/lpmake" \
+    "${LPMake_SHAS[$i]}"; then
+    echo "  [!] lpmake source unavailable or failed verification" >&2
     continue
   fi
-  if [ ! -s "$TEMP_DIR/e2fsdroid" ]; then
-    echo "  [!] e2fsdroid source was empty; trying the next pinned source" >&2
+
+  if ! curl --fail --silent --show-error --location \
+    --retry 5 --retry-all-errors --retry-delay 5 \
+    --connect-timeout 30 --max-time 180 \
+    "${LIB_ARCHIVE_URLS[$LIB_INDEX]}" -o "$BUNDLE_DIR/lib64.tar.gz"; then
+    echo "  [!] matching AOSP library source unavailable" >&2
     continue
   fi
-  if [ -n "${E2FSDROID_SHAS[$i]}" ] \
-    && ! printf '%s  %s\n' "${E2FSDROID_SHAS[$i]}" "$TEMP_DIR/e2fsdroid" \
+  if ! tar -xzf "$BUNDLE_DIR/lib64.tar.gz" -C "$BUNDLE_DIR/lib64" \
+    || [ ! -f "$BUNDLE_DIR/lib64/liblp.so" ]; then
+    echo "  [!] matching AOSP library archive is invalid" >&2
+    continue
+  fi
+  if [ -n "${LIB_LP_SHAS[$LIB_INDEX]}" ] \
+    && ! printf '%s  %s\n' "${LIB_LP_SHAS[$LIB_INDEX]}" "$BUNDLE_DIR/lib64/liblp.so" \
       | sha256sum --check --status; then
-    echo "  [!] e2fsdroid checksum mismatch; refusing this source" >&2
+    echo "  [!] matching liblp.so checksum mismatch" >&2
     continue
   fi
-  E2FSDROID_READY=1
+
+  if ! download_aosp_blob \
+    "${E2FSDROID_URLS[$E2FSDROID_INDEX]}" \
+    "$BUNDLE_DIR/e2fsdroid" \
+    "${E2FSDROID_SHAS[$E2FSDROID_INDEX]}"; then
+    echo "  [!] matching e2fsdroid source unavailable or failed verification" >&2
+    continue
+  fi
+
+  chmod 0755 "$BUNDLE_DIR/lpmake" "$BUNDLE_DIR/e2fsdroid"
+  BUNDLE_LD_LIBRARY_PATH="$BUNDLE_DIR/lib64:/usr/lib/x86_64-linux-gnu/android"
+  if ! env LD_LIBRARY_PATH="$BUNDLE_LD_LIBRARY_PATH" \
+    "$BUNDLE_DIR/lpmake" --help >/dev/null 2>&1; then
+    echo "  [!] matching lpmake/library bundle failed its execution check" >&2
+    continue
+  fi
+  if ! tool_responds env LD_LIBRARY_PATH="$BUNDLE_LD_LIBRARY_PATH" \
+    "$BUNDLE_DIR/e2fsdroid"; then
+    echo "  [!] matching e2fsdroid/library bundle failed its execution check" >&2
+    continue
+  fi
+  BUNDLE_READY=1
   break
 done
-if [ "$E2FSDROID_READY" != "1" ]; then
-  echo "[-] ERROR: No verified AOSP e2fsdroid source could be downloaded." >&2
+
+if [ "$BUNDLE_READY" != "1" ]; then
+  echo "[-] ERROR: No matching verified AOSP lpmake/e2fsdroid bundle could be installed." >&2
   exit 1
 fi
 
 AOSP_LIB_DIR="/usr/local/lib/h3cknn-gsi/aosp-lib64"
 sudo install -d -m 0755 "$AOSP_LIB_DIR"
-sudo install -m 0755 "$TEMP_DIR/lib64/"*.so "$AOSP_LIB_DIR/"
-sudo install -m 0755 "$TEMP_FILE" "$AOSP_LIB_DIR/lpmake.bin"
+sudo install -m 0755 "$BUNDLE_DIR/lib64/"*.so "$AOSP_LIB_DIR/"
+sudo install -m 0755 "$BUNDLE_DIR/lpmake" "$AOSP_LIB_DIR/lpmake.bin"
 sudo install -m 0755 "$(dirname "$(realpath "$0")")/lpmake_wrapper.sh" /usr/local/bin/lpmake
-sudo install -m 0755 "$TEMP_DIR/e2fsdroid" "$AOSP_LIB_DIR/e2fsdroid.bin"
+sudo install -m 0755 "$BUNDLE_DIR/e2fsdroid" "$AOSP_LIB_DIR/e2fsdroid.bin"
 sudo install -m 0755 "$(dirname "$(realpath "$0")")/e2fsdroid_wrapper.sh" /usr/local/bin/e2fsdroid
-echo "  [+] lpmake installed at /usr/local/bin/lpmake"
-echo "  [+] e2fsdroid installed at /usr/local/bin/e2fsdroid"
+echo "  [+] matching lpmake and e2fsdroid installed"
