@@ -3,21 +3,23 @@
 
 set -Eeuo pipefail
 
-tool_responds() {
+tool_starts() {
   local status=0
   "$@" >/dev/null 2>&1 || status=$?
-  [ "$status" -eq 0 ] || [ "$status" -eq 1 ]
+  # A no-argument usage failure is expected and varies by AOSP revision. Do
+  # reject missing interpreters, permission errors, and signal termination.
+  [ "$status" -lt 125 ]
 }
 
 if command -v lpmake >/dev/null 2>&1 \
-  && tool_responds lpmake \
+  && tool_starts lpmake \
   && command -v e2fsdroid >/dev/null 2>&1; then
   E2FSDROID_STATUS=0
   # AOSP e2fsdroid has no --help option; with no image it prints usage and
   # exits 1. That still proves the ELF and its shared libraries can execute.
   e2fsdroid >/dev/null 2>&1 || E2FSDROID_STATUS=$?
   if [ "$E2FSDROID_STATUS" -eq 0 ] || [ "$E2FSDROID_STATUS" -eq 1 ]; then
-    if tool_responds e2fsdroid; then
+    if tool_starts e2fsdroid; then
       echo "  [+] lpmake and e2fsdroid already present"
       exit 0
     fi
@@ -162,12 +164,12 @@ for i in "${!LPMake_URLS[@]}"; do
 
   chmod 0755 "$BUNDLE_DIR/lpmake" "$BUNDLE_DIR/e2fsdroid"
   BUNDLE_LD_LIBRARY_PATH="$BUNDLE_DIR/lib64:/usr/lib/x86_64-linux-gnu/android"
-  if ! tool_responds env LD_LIBRARY_PATH="$BUNDLE_LD_LIBRARY_PATH" \
+  if ! tool_starts env LD_LIBRARY_PATH="$BUNDLE_LD_LIBRARY_PATH" \
     "$BUNDLE_DIR/lpmake"; then
     echo "  [!] matching lpmake/library bundle failed its execution check" >&2
     continue
   fi
-  if ! tool_responds env LD_LIBRARY_PATH="$BUNDLE_LD_LIBRARY_PATH" \
+  if ! tool_starts env LD_LIBRARY_PATH="$BUNDLE_LD_LIBRARY_PATH" \
     "$BUNDLE_DIR/e2fsdroid"; then
     echo "  [!] matching e2fsdroid/library bundle failed its execution check" >&2
     continue
