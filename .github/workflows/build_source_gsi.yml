@@ -139,7 +139,7 @@ jobs:
           echo "RELEASE_TAG=src-v$(date +%Y.%m.%d-%H%M%S)-${GITHUB_RUN_ID}" >> $GITHUB_ENV
 
       - name: "📤 Upload GSI Artifacts"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ github.event.inputs.variant }}
           path: |
