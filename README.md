@@ -31,6 +31,7 @@ Designed to run completely on **GitHub Actions** (with free Ubuntu runners and h
   - One-click build via `workflow_dispatch`.
   - Automatic runner disk cleanup (+35GB free space optimization).
   - Generates `.img.xz` images for normal flashing and `.img.gz` images for DSU Sideloader, then publishes both to GitHub Releases.
+  - Pins the build runner to Ubuntu 24.04 so Android filesystem and packaging tools do not change when GitHub moves the `ubuntu-latest` alias.
 
 ---
 

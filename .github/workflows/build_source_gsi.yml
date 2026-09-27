@@ -39,7 +39,7 @@ on:
 
 jobs:
   build_source_gsi:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Allow the workflow to create releases
     permissions:
       contents: write
@@ -164,6 +164,7 @@ jobs:
             - **Build Type**: `${{ github.event.inputs.build_type }}`
             - **Treble Layer**: TrebleDroid `${{ github.event.inputs.treble_branch }}`
             - **DSU signing**: Community GSI; not signed with a Samsung/Google OEM key
+            - **Runner**: Ubuntu 24.04
             - **Built on**: Run ${{ github.run_id }}
 
             ### ⚡ Flashing

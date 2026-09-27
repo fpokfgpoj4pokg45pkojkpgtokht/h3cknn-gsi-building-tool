@@ -35,7 +35,7 @@ on:
 jobs:
   easy_build:
     name: "⚡ Easy GSI Build"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
 
@@ -178,7 +178,7 @@ jobs:
             | Image mode | See `build-info.txt` |
             | DSU signing | Community GSI; installer/device must accept it |
             | ABI profile | Auto-detected from the source GSI/system properties |
-            | Runner | Ubuntu Latest |
+            | Runner | Ubuntu 24.04 |
 
             ### ⚡ How to use
             - **Device-specific boot chain:** the GSI contains system userspace
