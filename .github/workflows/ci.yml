@@ -27,6 +27,9 @@ jobs:
       - name: "GSI compatibility preflight"
         run: bash scripts/test_gsi_compatibility.sh
 
+      - name: "Boot diagnostics analysis"
+        run: bash scripts/test_boot_diagnostics.sh
+
       - name: "GSI/vendor compatibility comparison"
         run: bash scripts/test_gsi_vendor_compatibility.sh
 

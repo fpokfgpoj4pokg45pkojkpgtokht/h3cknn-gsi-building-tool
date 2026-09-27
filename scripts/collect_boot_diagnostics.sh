@@ -48,6 +48,12 @@ adb_cmd logcat -b all -d -v threadtime > "$OUTPUT_DIR/logcat-all.txt" 2>&1 || tr
 # builds; keep all other evidence if it is unavailable.
 adb_cmd bugreport "$OUTPUT_DIR/bugreport.zip" > "$OUTPUT_DIR/bugreport-command.txt" 2>&1 || true
 
+# Classify the captured evidence without changing the device or image.  Keep
+# collection successful even when the evidence is too sparse for a diagnosis.
+SCRIPT_DIR="$(dirname "$(realpath "$0")")"
+bash "$SCRIPT_DIR/analyze_boot_diagnostics.sh" \
+  "$OUTPUT_DIR" "$OUTPUT_DIR/boot-analysis.txt" || true
+
 if command -v sha256sum >/dev/null 2>&1; then
   find "$OUTPUT_DIR" -maxdepth 1 -type f ! -name 'SHA256SUMS.txt' \
     -print0 | sort -z | xargs -0 sha256sum > "$OUTPUT_DIR/SHA256SUMS.txt" 2>/dev/null || true
