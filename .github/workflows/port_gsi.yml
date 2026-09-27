@@ -266,7 +266,7 @@ jobs:
           retention-days: 7
 
       - name: "🏷️ Create GitHub Release"
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3.0.3
         # BUG FIX: 'startsWith(github.ref, "refs/heads/")' never fires on
         # workflow_dispatch from Actions UI. Removed condition so releases
         # are always created after a successful build.

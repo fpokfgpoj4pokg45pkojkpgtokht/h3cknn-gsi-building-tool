@@ -124,7 +124,7 @@ jobs:
           retention-days: 14
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3.0.3
         with:
           tag_name: "samsung-${{ github.run_id }}"
           name: "${{ inputs.output_name }} (${{ inputs.device_model }})"
