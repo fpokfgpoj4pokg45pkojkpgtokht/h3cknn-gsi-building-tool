@@ -65,19 +65,19 @@ TOOLS_DIR="$(dirname "$(realpath "$0")")/../tools"
 
 echo "==> [SETUP] Installing payload-dumper-go..."
 if ! command -v payload-dumper-go &>/dev/null; then
-  # Fetch latest version tag via GitHub API, fall back to known good version
-  PDGO_VERSION=$(curl --fail --silent --show-error --location \
-    --retry 5 --retry-all-errors --retry-delay 5 \
-    --connect-timeout 30 --max-time 60 \
-    "https://api.github.com/repos/ssut/payload-dumper-go/releases/latest" \
-    | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'].lstrip('v'))" 2>/dev/null \
-    || echo "2.0.2")
+  # Pin the extractor so a changed upstream release cannot silently alter
+  # payload parsing or produce a different system image on a later build.
+  # The checksum is the GitHub release asset digest for this exact archive.
+  PDGO_VERSION="2.1.0"
+  PDGO_SHA256="bbbb53a71955c69272afdef7bc7e83a1bb1770f453d0c21dcaf61a3ba0463c11"
   PDGO_URL="https://github.com/ssut/payload-dumper-go/releases/download/${PDGO_VERSION}/payload-dumper-go_${PDGO_VERSION}_linux_amd64.tar.gz"
   echo "  -> Downloading payload-dumper-go v${PDGO_VERSION}..."
   curl --fail --silent --show-error --location \
     --retry 5 --retry-all-errors --retry-delay 5 \
     --connect-timeout 30 --max-time 180 \
     "$PDGO_URL" -o /tmp/payload-dumper-go.tar.gz
+  printf '%s  %s\n' "$PDGO_SHA256" /tmp/payload-dumper-go.tar.gz \
+    | sha256sum --check --status
   tar -xzf /tmp/payload-dumper-go.tar.gz -C /tmp/
   sudo mv /tmp/payload-dumper-go "$BIN_DIR/"
   sudo chmod +x "$BIN_DIR/payload-dumper-go"
@@ -89,13 +89,16 @@ fi
 
 echo "==> [SETUP] Ensuring lpunpack.py is available..."
 # BUG FIX: Previous version fetched from ErfanGSIs which is 404.
-# Now uses unix3dgforce/lpunpack - a pure-Python super.img unpacker.
+# Now uses the repository's checked-in copy, avoiding a moving remote script.
 if [ ! -f "$TOOLS_DIR/lpunpack.py" ]; then
+  LPUNPACK_COMMIT="c59b8f3b069c5a8aa438a049fa4a091177172434"
+  LPUNPACK_GIT_BLOB_SHA="9671d1d731d28f04f0d65dad0dacb2110da87029"
   curl --fail --silent --show-error --location \
     --retry 5 --retry-all-errors --retry-delay 5 \
     --connect-timeout 30 --max-time 60 \
-    "https://raw.githubusercontent.com/unix3dgforce/lpunpack/master/lpunpack.py" \
+    "https://raw.githubusercontent.com/unix3dgforce/lpunpack/$LPUNPACK_COMMIT/lpunpack.py" \
     -o "$TOOLS_DIR/lpunpack.py"
+  [ "$(git hash-object "$TOOLS_DIR/lpunpack.py")" = "$LPUNPACK_GIT_BLOB_SHA" ]
   echo "  [+] lpunpack.py downloaded to tools/."
 else
   echo "  [+] lpunpack.py already present in tools/."
