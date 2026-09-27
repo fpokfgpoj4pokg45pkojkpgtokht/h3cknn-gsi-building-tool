@@ -101,4 +101,7 @@ else
   echo "  [+] lpunpack.py already present in tools/."
 fi
 
+echo "==> [SETUP] Installing verified Android filesystem tools..."
+bash "$(dirname "$(realpath "$0")")/install_e2fsdroid.sh"
+
 echo "==> [SETUP] Environment configured successfully."

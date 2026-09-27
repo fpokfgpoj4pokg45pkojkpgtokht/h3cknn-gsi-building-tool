@@ -45,7 +45,8 @@ jobs:
       - name: "🧱 OEM ext4 repack integration"
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends e2fsprogs
+          sudo apt-get install -y -qq --no-install-recommends e2fsprogs android-libbase-dev
+          bash scripts/install_e2fsdroid.sh
           bash scripts/test_repack_ext4.sh
 
       - name: "🧱 OEM EROFS repack integration"
