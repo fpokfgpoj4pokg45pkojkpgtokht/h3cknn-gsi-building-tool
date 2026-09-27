@@ -5,7 +5,10 @@ set -Eeuo pipefail
 
 ROOT_DIR="$(dirname "$(dirname "$(realpath "$0")")")"
 TEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/repack-gsi-test.XXXXXX")
-trap 'rm -rf -- "$TEST_DIR"' EXIT
+cleanup_test_dir() {
+  sudo rm -rf -- "$TEST_DIR"
+}
+trap cleanup_test_dir EXIT
 
 mkdir -p "$TEST_DIR/system/etc/selinux"
 mkdir -p "$TEST_DIR/system/bin"
