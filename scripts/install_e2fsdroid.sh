@@ -28,6 +28,8 @@ PRIMARY_LIBLP_SHA256="af1f83237fed0c284d2c24ed6cf64381cf4e6cbe0e54f02c6299d5bb5d
 FALLBACK_LIBLP_SHA256="95221e036a664be40d67e07e0dfd026305f12390fdfa957d4aa3a3296bd519a3"
 PRIMARY_E2FSDROID_SHA256="ca8b1bd989718b62f670381b3ef245276becc9a4a919e50e96948f6c051e267e"
 FALLBACK_E2FSDROID_SHA256="a56dbdb9f19a5be79f3de5914ad576d938fc497429d36dc476ed223d2049a81f"
+PLATFORM_TOOLS_E2FSDROID_URL="https://android.googlesource.com/platform/prebuilts/fullsdk-linux/platform-tools/+/83a183b4bced4377eb5817074db82885cfcae393/e2fsdroid?format=TEXT"
+PLATFORM_TOOLS_E2FSDROID_SHA256="9c11ea7840cfd14322d750a3fa1f2c2821969466c3ac8fe67c09da6dc6937dfd"
 
 E2FSDROID_URLS=(
   "https://android.googlesource.com/kernel/prebuilts/build-tools/+/$PRIMARY_COMMIT/linux-x86/bin/e2fsdroid?format=TEXT"
@@ -106,6 +108,26 @@ for i in "${!E2FSDROID_URLS[@]}"; do
   break
 done
 
+# The kernel-prebuilts repository can temporarily return 5xx responses even
+# when the official platform-tools mirror is available. This older AOSP binary
+# is a last-resort fallback; it uses the host's e2fsprogs/SELinux libraries and
+# is still checksum-pinned before it can be installed.
+if [ "$BUNDLE_READY" != "1" ]; then
+  echo "  -> Trying official AOSP platform-tools e2fsdroid fallback..."
+  rm -rf -- "$BUNDLE_DIR"
+  mkdir -p "$BUNDLE_DIR/lib64"
+  if download_aosp_blob \
+    "$PLATFORM_TOOLS_E2FSDROID_URL" \
+    "$BUNDLE_DIR/e2fsdroid" \
+    "${PLATFORM_TOOLS_E2FSDROID_SHA256// /}"; then
+    chmod 0755 "$BUNDLE_DIR/e2fsdroid"
+    if tool_starts "$BUNDLE_DIR/e2fsdroid"; then
+      BUNDLE_READY=1
+      echo "  [+] official AOSP platform-tools fallback is executable"
+    fi
+  fi
+fi
+
 if [ "$BUNDLE_READY" != "1" ]; then
   echo "[-] ERROR: No matching verified AOSP e2fsdroid bundle could be installed." >&2
   exit 1
@@ -113,7 +135,9 @@ fi
 
 AOSP_LIB_DIR="/usr/local/lib/h3cknn-gsi/aosp-lib64"
 sudo install -d -m 0755 "$AOSP_LIB_DIR"
-sudo install -m 0755 "$BUNDLE_DIR/lib64/"*.so "$AOSP_LIB_DIR/"
+if compgen -G "$BUNDLE_DIR/lib64/*.so" >/dev/null; then
+  sudo install -m 0755 "$BUNDLE_DIR/lib64/"*.so "$AOSP_LIB_DIR/"
+fi
 sudo install -m 0755 "$BUNDLE_DIR/e2fsdroid" "$AOSP_LIB_DIR/e2fsdroid.bin"
 sudo install -m 0755 "$(dirname "$(realpath "$0")")/e2fsdroid_wrapper.sh" /usr/local/bin/e2fsdroid
 echo "  [+] verified AOSP e2fsdroid installed"
