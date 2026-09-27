@@ -87,9 +87,13 @@ set_prop() {
   local key="$1"
   local val="$2"
   local escaped_val
+  local escaped_key
   escaped_val=$(escape_sed_replacement "$val")
-  if grep -q "^${key}=" "$BUILD_PROP"; then
-    "${SUDO[@]}" sed -i "s|^${key}=.*|${key}=${escaped_val}|" "$BUILD_PROP"
+  # Android property keys use dots as separators. Escape them before passing
+  # the key to sed so a lookalike key cannot be replaced accidentally.
+  escaped_key="${key//./\\.}"
+  if grep -Eq "^${escaped_key}=" "$BUILD_PROP"; then
+    "${SUDO[@]}" sed -i -E "s|^${escaped_key}=.*|${key}=${escaped_val}|" "$BUILD_PROP"
   else
     printf '%s\n' "${key}=${val}" | "${SUDO[@]}" tee -a "$BUILD_PROP" > /dev/null
   fi

@@ -14,6 +14,7 @@ BUILD_PROP="${1:-}"
 TARGET_MODEL="${2:-generic}"
 REPORT_PATH="${3:-compatibility-report.txt}"
 EXPECTED_ARCH="${4:-arm64}"
+TARGET_MODEL_ID=$(printf '%s' "$TARGET_MODEL" | tr '[:lower:]' '[:upper:]')
 
 case "$EXPECTED_ARCH" in
   arm64|arm|a64|auto) ;;
@@ -119,7 +120,7 @@ if [[ "$SDK" =~ ^[0-9]+$ ]] && [ "$SDK" -lt 29 ]; then
   fail "Android SDK $SDK predates the Android 10 Treble baseline."
 fi
 
-case "$TARGET_MODEL" in
+case "$TARGET_MODEL_ID" in
   generic|""|unknown) ;;
   SM-M127*|SM-F127*|SM-A127*)
     warn "Galaxy M12/A12 Exynos 850 requires the exact matching vendor, boot/kernel, DTB, vbmeta, recovery, and device-specific multidisabler procedure."
