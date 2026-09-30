@@ -40,7 +40,7 @@ on:
 
 jobs:
   port_gsi:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 9999
     concurrency:
       group: port-gsi
