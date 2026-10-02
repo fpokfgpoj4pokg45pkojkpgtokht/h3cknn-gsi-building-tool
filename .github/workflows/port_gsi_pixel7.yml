@@ -4,12 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       rom_url:
-        description: "📥 Direct URL to the GSI (.img.xz / .img). Signed GitHub asset links EXPIRE (~1h), prefer the permanent release link."
+        description: "📥 Direct URL to the GSI (.img.xz / .img)"
         required: true
         type: string
-        # NOTE: this signed link expires 2026-10-02 01:04 UTC. After that, paste the
-        # permanent https://github.com/<owner>/<repo>/releases/download/... URL instead.
-        default: "https://release-assets.githubusercontent.com/github-production-release-asset/1035698395/2562770c-7b6f-4491-824b-bb9f47b8dd7f?sp=r&sv=2018-11-09&sr=b&spr=https&se=2026-10-02T01%3A04%3A07Z&rscd=attachment%3B+filename%3DLunaris-3.12-GSI_treble_arm64-ab-GAPPS-Official-20260920.img.xz&rsct=application%2Foctet-stream&skoid=96c2d410-5711-43a1-aedd-ab1947aa7ab0&sktid=398a6654-997b-47e9-b12b-9515b896b4de&skt=2026-10-02T00%3A04%3A03Z&ske=2026-10-02T01%3A04%3A07Z&sks=b&skv=2018-11-09&sig=NiEPz9OwWFoGQsJbsFS9WR4%2BukxMMiyQR4PiXc82sl0%3D&jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmVsZWFzZS1hc3NldHMuZ2l0aHVidXNlcmNvbnRlbnQuY29tIiwia2V5Ijoia2V5MSIsImV4cCI6MTc5MDkwMzA3OSwibmJmIjoxNzkwODk5NDc5LCJwYXRoIjoicmVsZWFzZWFzc2V0cHJvZHVjdGlvbi5ibG9iLmNvcmUud2luZG93cy5uZXQifQ.Hpn2A4a-oZwT4fGxxzBeENYv2rkcsRMJVQmv4UISWbM&response-content-disposition=attachment%3B filename%3DLunaris-3.12-GSI_treble_arm64-ab-GAPPS-Official-20260920.img.xz&response-content-type=application%2Foctet-stream"
+        default: "https://github.com/Doze-off/Lunaris-AOSP_gsi/releases/download/2026-09-20/Lunaris-3.12-GSI_treble_arm64-ab-GAPPS-Official-20260920.img.xz"
       output_name:
         description: "📛 Output GSI name"
         required: true
@@ -29,12 +27,22 @@ on:
         default: true
         type: boolean
       factory_image_url:
-        description: "📱 Pixel 7 (panther) factory image ZIP from developers.google.com/android/images (gives matching stock kernel, vendor, vbmeta). Leave empty to skip."
+        description: "📱 Pixel 7 (panther) factory image ZIP (stock kernel, vendor, vbmeta). Default: Android 16 QPR2 (BP4A.251205.006). Clear the field to skip."
         required: false
-        default: ""
+        default: "https://dl.google.com/dl/android/aosp/panther-bp4a.251205.006-factory-4455f800.zip"
         type: string
+      inject_stock_euicc:
+        description: "📶 If the GSI has no eUICC (eSIM) app, pull EuiccGoogle/EuiccSupportPixel from the Pixel 7 factory image and add them"
+        required: true
+        default: true
+        type: boolean
       include_vendor_images:
         description: "🧩 Also bundle stock vendor/odm/dlkm images (recommended: fixes lock screen / KeyMint mismatches)"
+        required: true
+        default: true
+        type: boolean
+      include_bootloader_radio:
+        description: "🔌 Also bundle the factory bootloader + radio and flash them FIRST (syncs the Trusty/KeyMint/Gatekeeper TEE firmware with the vendor image; a common cause of a dead lock screen). Pixel 7 has anti-rollback: the factory image must not be older than what the phone runs now."
         required: true
         default: true
         type: boolean
@@ -50,7 +58,7 @@ jobs:
     timeout-minutes: 180
     concurrency:
       group: port-gsi-pixel7
-      cancel-in-progress: true
+      cancel-in-progress: false
     permissions:
       contents: write
 
@@ -71,12 +79,131 @@ jobs:
           sudo apt-get install -y xz-utils android-sdk-libsparse-utils e2fsprogs \
             erofs-utils rsync attr xxd file unzip zip
 
+      - name: "📥 Fetch Pixel 7 Stock Firmware & Extract eUICC Apps"
+        env:
+          FACTORY_URL: ${{ inputs.factory_image_url }}
+          INJECT_EUICC: ${{ inputs.inject_stock_euicc }}
+        run: |
+          set -euo pipefail
+          W="$GITHUB_WORKSPACE/workspace"
+          F="$W/factory"; E="$W/euicc"
+          mkdir -p "$F" "$E"
+          cd "$F"
+          hex_at() { dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null | xxd -p; }
+
+          if [ -z "$FACTORY_URL" ]; then
+            echo "::warning::No factory_image_url: skipping stock firmware (no kernel/vendor bundle, no eUICC extraction)."
+            exit 0
+          fi
+
+          curl -fL --retry 5 --retry-delay 5 --retry-all-errors -o factory.zip "$FACTORY_URL"
+
+          # Integrity check: Google factory ZIP names end in the first 8 hex chars of the SHA-256
+          EXPECTED=$(basename "${FACTORY_URL%%\?*}" | sed -nE 's/.*-factory-([0-9a-f]{8})\.zip$/\1/p')
+          if [ -n "$EXPECTED" ]; then
+            ACTUAL=$(sha256sum factory.zip | cut -c1-8)
+            if [ "$ACTUAL" != "$EXPECTED" ]; then
+              echo "::error::Factory image checksum mismatch (expected $EXPECTED..., got $ACTUAL...). Wrong URL or corrupted download."
+              exit 1
+            fi
+            echo "Factory image checksum OK ($ACTUAL)"
+          fi
+
+          unzip -q factory.zip -d fx
+          rm -f factory.zip
+          IMGZIP=$(find fx -name 'image-panther-*.zip' | head -n1)
+          if [ -z "$IMGZIP" ]; then
+            echo "::error::No image-panther-*.zip inside the factory image. This must be the Pixel 7 (panther) factory ZIP, not a Pixel 7 Pro (cheetah) or 7a (lynx) one."
+            exit 1
+          fi
+          # Bootloader + radio live in the OUTER zip, next to image-panther-*.zip.
+          # Keep them: the Trusty TEE (KeyMint/Gatekeeper) ships inside bootloader.img.
+          mkdir -p "$F/fw"
+          find fx -maxdepth 3 -type f \( -name 'bootloader-panther-*.img' -o -name 'radio-panther-*.img' \) \
+            -exec cp {} "$F/fw/" \;
+          ls -l "$F/fw" || true
+          unzip -q "$IMGZIP" -d img
+          rm -rf fx
+
+          # ---- Extract the eUICC apps from the stock Pixel 7 system partitions ----
+          if [ "$INJECT_EUICC" = "true" ]; then
+            for part in system_ext product system; do
+              f="img/$part.img"
+              [ -f "$f" ] || continue
+              R="$f"
+              if [ "$(hex_at "$f" 0 4)" = "ed26ff3a" ]; then
+                R="$F/$part.raw"; simg2img "$f" "$R"
+              fi
+              M="$F/mnt_$part"; mkdir -p "$M"
+              if ! sudo mount -o loop,ro "$R" "$M"; then
+                echo "::warning::Could not mount stock $part.img; skipping it"
+                continue
+              fi
+              BASE="$M"
+              [ "$part" = "system" ] && [ -f "$M/system/build.prop" ] && BASE="$M/system"
+
+              for d in "$BASE"/priv-app/*[Ee]uicc* "$BASE"/app/*[Ee]uicc*; do
+                [ -d "$d" ] || continue
+                kind=$(basename "$(dirname "$d")")
+                mkdir -p "$E/$part/$kind"
+                sudo cp -a "$d" "$E/$part/$kind/"
+                echo "extracted $part/$kind/$(basename "$d")"
+              done
+
+              # Related permission / sysconfig files named *euicc*
+              for sub in permissions sysconfig; do
+                if [ -d "$BASE/etc/$sub" ]; then
+                  mkdir -p "$E/$part/etc/$sub"
+                  find "$BASE/etc/$sub" -maxdepth 1 -type f -iname '*euicc*' \
+                    -exec sudo cp -a {} "$E/$part/etc/$sub/" \;
+                fi
+              done
+
+              # Pull only the eUICC <privapp-permissions> entries out of the shared allowlists
+              if [ -d "$BASE/etc/permissions" ]; then
+                python3 - "$BASE/etc/permissions" "$E/$part/etc/permissions/privapp-permissions-stock-euicc.xml" <<'PY'
+          import sys, glob, os
+          import xml.etree.ElementTree as ET
+          src, dst = sys.argv[1:3]
+          out = ET.Element("permissions"); n = 0
+          for f in sorted(glob.glob(os.path.join(src, "privapp-permissions*.xml"))):
+              try:
+                  root = ET.parse(f).getroot()
+              except Exception:
+                  continue
+              for el in root.iter("privapp-permissions"):
+                  if "euicc" in el.get("package", "").lower():
+                      out.append(el); n += 1
+          if n:
+              os.makedirs(os.path.dirname(dst), exist_ok=True)
+              ET.ElementTree(out).write(dst, encoding="utf-8", xml_declaration=True)
+              print("privapp-permissions entries extracted:", n)
+          PY
+              fi
+
+              sudo umount "$M"
+              rm -f "$F/$part.raw"
+            done
+
+            sudo chown -R "$USER" "$E"
+            # Stale odex/vdex from the stock ART build must not be reused; let the device dexopt
+            find "$E" -type d -name oat -prune -exec rm -rf {} + 2>/dev/null || true
+            echo "::group::Extracted eUICC files"
+            (cd "$E" && find . -type f | sort) || true
+            echo "::endgroup::"
+          fi
+
+          # The big stock system partitions are no longer needed; free the disk space
+          rm -f img/system.img img/system_ext.img img/product.img
+          df -h /
+
       - name: "🚀 Download, Patch & Repack GSI"
         env:
           INPUT_ROM_URL: ${{ inputs.rom_url }}
           INPUT_OUTPUT_NAME: ${{ inputs.output_name }}
           INPUT_FS_TYPE: ${{ inputs.fs_type }}
           INPUT_REQUIRE_ESIM: ${{ inputs.require_esim_stack }}
+          INPUT_INJECT_EUICC: ${{ inputs.inject_stock_euicc }}
         run: |
           set -euo pipefail
           W="$GITHUB_WORKSPACE/workspace"
@@ -117,26 +244,25 @@ jobs:
           fi
           echo "Source filesystem: $SRC_FS"
 
-          # ---------- 4. Build an ext4 working copy (rw) ----------
+          # ---------- 4. Copy the source into a fresh, writable ext4 image ----------
+          # The source is mounted READ-ONLY and copied out. This avoids e2fsck
+          # -E unshare_blocks / resize2fs on Android's deduplicated (shared_blocks)
+          # ext4 images, which is slow, needs free space and can fail or hang.
           WORK="$T/work.img"
           if [ "$SRC_FS" = "ext4" ]; then
-            mv rom.img "$WORK"
-            set +e; e2fsck -fy -E unshare_blocks "$WORK"; rc=$?; set -e
-            [ "$rc" -le 1 ] || { echo "::error::e2fsck failed ($rc)"; exit 1; }
-            truncate -s +512M "$WORK"
-            set +e; e2fsck -fy "$WORK"; set -e
-            resize2fs "$WORK"
-            sudo mount -o loop,rw "$WORK" "$MNT"
+            sudo mount -t ext4 -o loop,ro,noload "$T/rom.img" "$SRC"
           else
             sudo mount -t erofs -o loop,ro "$T/rom.img" "$SRC"
-            USED=$(sudo du -sb "$SRC" | cut -f1)
-            truncate -s $(( USED + USED/8 + 700*1024*1024 )) "$WORK"
-            mkfs.ext4 -q -b 4096 -L system -O ^has_journal "$WORK"
-            sudo mount -o loop,rw "$WORK" "$MNT"
-            sudo rsync -aHAX --numeric-ids "$SRC"/ "$MNT"/
-            sudo umount "$SRC"
-            rm -f "$T/rom.img"
           fi
+          USED=$(sudo du -sb "$SRC" | cut -f1)
+          echo "Source content size: $(numfmt --to=iec-i --suffix=B "$USED")"
+          truncate -s $(( USED + USED/8 + 700*1024*1024 )) "$WORK"
+          mkfs.ext4 -q -b 4096 -L system -O ^has_journal "$WORK"
+          sudo mount -o loop,rw "$WORK" "$MNT"
+          sudo rsync -aHAX --numeric-ids "$SRC"/ "$MNT"/
+          sudo umount "$SRC"
+          rm -f "$T/rom.img"
+          df -h "$MNT"
 
           # ---------- 5. Locate system root ----------
           if [ -f "$MNT/system/build.prop" ]; then
@@ -155,6 +281,7 @@ jobs:
           echo "Fprint  : $(getp ro.system.build.fingerprint)"
           echo "::endgroup::"
           getp ro.build.version.sdk > "$W/gsi-sdk.txt"
+          getp ro.build.version.security_patch > "$W/gsi-patch.txt"
 
           ABI="$(getp ro.system.product.cpu.abilist)$(getp ro.product.cpu.abilist)"
           case "$ABI" in
@@ -163,15 +290,35 @@ jobs:
           esac
 
           # ---------- 6. eSIM (eUICC) support ----------
+          find_euicc() {
+            sudo find "$MNT" -maxdepth 7 \( -iname 'EuiccGoogle*' -o -iname 'EuiccSupportPixel*' \) \
+              -not -path '*/lib/*' -not -path '*/lib64/*' | head -n 20 || true
+          }
           echo "::group::eSIM stack check"
-          EUICC_FOUND=$(sudo find "$MNT" -maxdepth 7 -iname '*euicc*' \
-            -not -path '*/lib/*' -not -path '*/lib64/*' | head -n 20 || true)
-          echo "${EUICC_FOUND:-<none>}"
+          EUICC_FOUND=$(find_euicc)
+          echo "Already in GSI: ${EUICC_FOUND:-<none>}"
+
+          if [ -z "$EUICC_FOUND" ] && [ "$INPUT_INJECT_EUICC" = "true" ] \
+             && [ -n "$(ls -A "$W/euicc" 2>/dev/null)" ]; then
+            echo "Injecting eUICC apps extracted from the Pixel 7 factory image"
+            for part_dir in "$W"/euicc/*/; do
+              part=$(basename "$part_dir")
+              if [ "$part" = "system" ]; then DEST="$SYS"; else DEST="$SYS/$part"; fi
+              sudo mkdir -p "$DEST"
+              sudo rsync -rlt --chown=0:0 --chmod=D755,F644 "$part_dir" "$DEST/"
+              while IFS= read -r rel; do
+                sudo setfattr -n security.selinux -v "u:object_r:system_file:s0" "$DEST/$rel" 2>/dev/null || true
+              done < <(cd "$part_dir" && find . -mindepth 1)
+              echo "  -> $DEST"
+            done
+            EUICC_FOUND=$(find_euicc)
+            echo "Now in GSI: ${EUICC_FOUND:-<none>}"
+          fi
           echo "::endgroup::"
 
           if [ -z "$EUICC_FOUND" ]; then
             if [ "$INPUT_REQUIRE_ESIM" = "true" ]; then
-              echo "::error::No eUICC/eSIM app found in this image. eSIM cannot work without Google's EuiccGoogle (or equivalent LPA). Use a GAPPS build that ships it."
+              echo "::error::No eUICC/eSIM app found in the GSI and none could be extracted from the factory image (check factory_image_url and inject_stock_euicc)."
               exit 1
             else
               echo "::warning::No eUICC app found; eSIM will NOT work on this build."
@@ -225,6 +372,7 @@ jobs:
           FACTORY_URL: ${{ inputs.factory_image_url }}
           INCLUDE_VENDOR: ${{ inputs.include_vendor_images }}
           CUSTOM_BOOT_URL: ${{ inputs.custom_kernel_boot_url }}
+          INCLUDE_BL: ${{ inputs.include_bootloader_radio }}
           INPUT_OUTPUT_NAME: ${{ inputs.output_name }}
         run: |
           set -euo pipefail
@@ -234,21 +382,10 @@ jobs:
           cd "$F"
           hex_at() { dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null | xxd -p; }
 
-          if [ -z "$FACTORY_URL" ]; then
-            echo "::warning::No factory_image_url given: skipping the Pixel 7 firmware bundle. You must already be on matching stock firmware, or the lock screen / eSIM may not work."
+          if [ ! -d "$F/img" ]; then
+            echo "::warning::No stock firmware was fetched: skipping the Pixel 7 firmware bundle. You must already be on matching stock firmware, or the lock screen / eSIM may not work."
             exit 0
           fi
-
-          # ---- Download + unpack the stock Pixel 7 factory image ----
-          curl -fL --retry 5 --retry-delay 5 --retry-all-errors -o factory.zip "$FACTORY_URL"
-          unzip -q factory.zip -d fx
-          rm -f factory.zip
-          IMGZIP=$(find fx -name 'image-panther-*.zip' | head -n1)
-          if [ -z "$IMGZIP" ]; then
-            echo "::error::No image-panther-*.zip inside the factory image. This must be the Pixel 7 (panther) factory ZIP, not a Pixel 7 Pro (cheetah) or 7a (lynx) one."
-            exit 1
-          fi
-          unzip -q "$IMGZIP" -d img
 
           # ---- Kernel / boot-chain images (these are what provide the kernel) ----
           for p in boot init_boot vendor_boot vendor_kernel_boot dtbo pvmfw vbmeta vbmeta_system vbmeta_vendor; do
@@ -262,9 +399,22 @@ jobs:
             echo "::warning::Custom kernel boot.img used. Its modules must match the bundled vendor_dlkm/system_dlkm or the device may bootloop."
           fi
 
+          # ---- Bootloader + radio (Trusty TEE with KeyMint/Gatekeeper TAs, modem) ----
+          if [ "$INCLUDE_BL" = "true" ]; then
+            for f in "$F"/fw/*.img; do
+              [ -f "$f" ] || continue
+              case "$(basename "$f")" in
+                bootloader-*) cp "$f" "$B/bootloader.img"; echo "bundled bootloader: $(basename "$f")" ;;
+                radio-*)      cp "$f" "$B/radio.img";      echo "bundled radio: $(basename "$f")" ;;
+              esac
+            done
+            ls -1 "$F/fw" > "$B/firmware-versions.txt" 2>/dev/null || true
+            [ -f "$B/bootloader.img" ] || echo "::warning::No bootloader image found in the factory ZIP; lock screen may stay broken if your phone's bootloader does not match this vendor image."
+          fi
+
           # ---- Vendor-side images (HALs: KeyMint, Gatekeeper, Weaver, radio) ----
           if [ "$INCLUDE_VENDOR" = "true" ]; then
-            for p in vendor vendor_dlkm system_dlkm odm; do
+            for p in vendor vendor_dlkm system_dlkm odm odm_dlkm; do
               [ -f "img/$p.img" ] && cp "img/$p.img" "$B/$p.img" && echo "bundled $p.img"
             done
 
@@ -285,6 +435,12 @@ jobs:
                   sudo grep -rhoE 'android\.hardware\.(gatekeeper|security\.keymint|security\.authgraph|weaver|security\.secureclock|security\.sharedsecret)' \
                     "$F/vmnt/etc/vintf" 2>/dev/null | sort -u || true
                 } | tee "$B/vendor-compat.txt"
+                VPATCH=$(sudo grep -m1 '^ro.vendor.build.security_patch=' "$F/vmnt/build.prop" | cut -d= -f2- || true)
+                GPATCH=$(cat "$W/gsi-patch.txt" 2>/dev/null || true)
+                echo "Vendor patch level: ${VPATCH:-unknown} | GSI patch level: ${GPATCH:-unknown}"
+                if [ -n "$VPATCH" ] && [ -n "$GPATCH" ] && [[ "$GPATCH" < "$VPATCH" ]]; then
+                  echo "::warning::GSI security patch ($GPATCH) is OLDER than the vendor/boot patch ($VPATCH). KeyMint rejects patch-level downgrades, which breaks PIN/pattern/fingerprint. Use an older factory image or a newer GSI build."
+                fi
                 if [ -n "${VSDK:-}" ] && [ "$GSDK" != "unknown" ] && [ "$VSDK" != "$GSDK" ]; then
                   echo "::warning::GSI SDK ($GSDK) differs from vendor SDK ($VSDK). Mismatched KeyMint/Gatekeeper HAL versions are the most common cause of broken lock screen on GSIs. Use a factory image matching the GSI's Android version if you hit this."
                 fi
@@ -299,28 +455,80 @@ jobs:
           cat > "$B/flash_all.sh" <<'SH'
           #!/usr/bin/env bash
           # Pixel 7 (panther) GSI flasher. WIPES ALL DATA. Bootloader must be unlocked.
-          # Usage: ./flash_all.sh path/to/system.img
-          set -e
-          GSI="$(realpath "${1:?usage: ./flash_all.sh <system.img>}")"
+          # Usage: ./flash_all.sh path/to/system.img [--delete-stock-product]
+          #   --delete-stock-product : also delete the stock product/system_ext logical
+          #   partitions so only the GSI's own copies are used (try this if the lock
+          #   screen is still broken after a normal flash).
+          set -eu
+          GSI="$(realpath "${1:?usage: ./flash_all.sh <system.img> [--delete-stock-product]}")"
+          CLEAN_PRODUCT=0
+          if [ "${2:-}" = "--delete-stock-product" ]; then CLEAN_PRODUCT=1; fi
           cd "$(dirname "$0")"
-          fastboot getvar product 2>&1 | grep -q panther || { echo "Not a Pixel 7 (panther)"; exit 1; }
 
+          wait_bootloader() {
+            local out
+            for _ in $(seq 60); do
+              out=$(fastboot getvar product 2>&1 || true)
+              case "$out" in *panther*) return 0 ;; esac
+              sleep 2
+            done
+            echo "Device did not show up in fastboot"; exit 1
+          }
+          wait_fastbootd() {
+            local out
+            for _ in $(seq 60); do
+              out=$(fastboot getvar is-userspace 2>&1 || true)
+              case "$out" in *"is-userspace: yes"*) return 0 ;; esac
+              sleep 2
+            done
+            echo "Device did not enter fastbootd"; exit 1
+          }
+
+          out=$(fastboot getvar product 2>&1 || true)
+          case "$out" in *panther*) ;; *) echo "Not a Pixel 7 (panther), or device not in fastboot"; exit 1 ;; esac
+
+          # ---- 1. Bootloader + radio first (keeps the Trusty TEE in sync with vendor) ----
+          if [ -f bootloader.img ]; then
+            echo "Phone bootloader : $(fastboot getvar version-bootloader 2>&1 | head -n1)"
+            echo "Bundle firmware  : $(cat firmware-versions.txt 2>/dev/null | tr '\n' ' ')"
+            echo "Pixel 7 has anti-rollback. Flashing a bootloader OLDER than the one on the"
+            echo "phone can brick it. The bundle must be the same version or newer."
+            read -r -p "Continue? [y/N] " ans
+            case "$ans" in y|Y) ;; *) echo "Aborted."; exit 1 ;; esac
+            fastboot flash --slot=all bootloader bootloader.img
+            fastboot reboot bootloader
+            wait_bootloader
+          fi
+          if [ -f radio.img ]; then
+            fastboot flash --slot=all radio radio.img
+            fastboot reboot bootloader
+            wait_bootloader
+          fi
+
+          # ---- 2. Boot chain (stock kernel / ramdisks) ----
           for p in boot init_boot vendor_boot vendor_kernel_boot dtbo pvmfw; do
-            [ -f "$p.img" ] && fastboot flash --slot=all "$p" "$p.img"
+            if [ -f "$p.img" ]; then fastboot flash --slot=all "$p" "$p.img"; fi
           done
-          [ -f vbmeta.img ] && fastboot flash --slot=all --disable-verity --disable-verification vbmeta vbmeta.img
-          for p in vbmeta_system vbmeta_vendor; do
-            [ -f "$p.img" ] && fastboot flash --slot=all "$p" "$p.img"
+          for p in vbmeta vbmeta_system vbmeta_vendor; do
+            if [ -f "$p.img" ]; then
+              fastboot flash --slot=all --disable-verity --disable-verification "$p" "$p.img"
+            fi
           done
 
+          # ---- 3. Logical partitions (fastbootd) ----
           fastboot reboot fastboot
-          sleep 8
-          for p in vendor vendor_dlkm system_dlkm odm; do
-            [ -f "$p.img" ] && fastboot flash "$p" "$p.img"
+          wait_fastbootd
+          if [ "$CLEAN_PRODUCT" = 1 ]; then
+            for p in product system_ext; do
+              for s in a b; do fastboot delete-logical-partition "${p}_${s}" || true; done
+            done
+          fi
+          for p in vendor vendor_dlkm system_dlkm odm odm_dlkm; do
+            if [ -f "$p.img" ]; then fastboot flash "$p" "$p.img"; fi
           done
           fastboot flash system "$GSI"
 
-          # Wipe is REQUIRED: leftover encrypted userdata from another ROM breaks the lock screen.
+          # Wipe is REQUIRED: leftover encrypted userdata/metadata from another ROM breaks the lock screen.
           fastboot -w
           fastboot reboot
           SH
@@ -331,6 +539,7 @@ jobs:
           Extract ${INPUT_OUTPUT_NAME}.img.xz to system.img, then:
             ./flash_all.sh /path/to/system.img
           This wipes all data. Requires platform-tools and an unlocked bootloader.
+          If the lock screen is still broken: ./flash_all.sh /path/to/system.img --delete-stock-product
           EOF
 
           (cd "$B" && zip -qr "$OUT/${INPUT_OUTPUT_NAME}-pixel7-firmware.zip" .)
@@ -406,10 +615,14 @@ jobs:
           supplied one; custom kernels must match the vendor_dlkm modules).
 
           ### Lock screen (PIN / pattern / fingerprint)
-          Lock screen credentials rely on the vendor KeyMint, Gatekeeper and Weaver HALs.
-          They break when the vendor firmware does not match the GSI, or when old encrypted
-          userdata is left on the device. Flash the matching vendor images and always wipe
-          (\`fastboot -w\`). The build log prints a vendor-vs-GSI compatibility check.
+          Lock screen credentials rely on the vendor KeyMint, Gatekeeper and Weaver HALs,
+          which talk to the Trusty TEE inside the **bootloader** image. They break when the
+          bootloader/radio, vendor images and GSI do not match, when the GSI patch level is
+          older than the vendor patch level, or when old encrypted userdata is left on the
+          device. The bundle flashes bootloader + radio first, then vendor images, and wipes.
+          The build log prints a vendor-vs-GSI SDK and patch-level check.
+          Still broken? Re-run \`./flash_all.sh <img> --delete-stock-product\`.
+          Pixel 7 has anti-rollback: never flash a bundle older than your current firmware.
 
           ### eSIM
           Works only if the base build ships Google's eUICC app (the build checks this).
