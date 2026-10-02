@@ -11,7 +11,6 @@ on:
         # permanent https://github.com/<owner>/<repo>/releases/download/... URL instead.
         default: "https://github.com/Doze-off/Lunaris-AOSP_gsi/releases/download/2026-09-20/Lunaris-3.12-GSI_treble_arm64-ab-GAPPS-Official-20260920.img.xz"   
         output_name:
-        description: "📛 Output GSI name"
         required: true
         default: "Lunaris_Pixel7_eSIM_GSI"
         type: string
