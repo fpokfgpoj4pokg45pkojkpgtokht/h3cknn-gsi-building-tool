@@ -9,8 +9,8 @@ on:
         type: string
         # NOTE: this signed link expires 2026-10-02 01:04 UTC. After that, paste the
         # permanent https://github.com/<owner>/<repo>/releases/download/... URL instead.
-        default: "https://release-assets.githubusercontent.com/github-production-release-asset/1035698395/2562770c-7b6f-4491-824b-bb9f47b8dd7f?sp=r&sv=2018-11-09&sr=b&spr=https&se=2026-10-02T01%3A04%3A07Z&rscd=attachment%3B+filename%3DLunaris-3.12-GSI_treble_arm64-ab-GAPPS-Official-20260920.img.xz&rsct=application%2Foctet-stream&skoid=96c2d410-5711-43a1-aedd-ab1947aa7ab0&sktid=398a6654-997b-47e9-b12b-9515b896b4de&skt=2026-10-02T00%3A04%3A03Z&ske=2026-10-02T01%3A04%3A07Z&sks=b&skv=2018-11-09&sig=NiEPz9OwWFoGQsJbsFS9WR4%2BukxMMiyQR4PiXc82sl0%3D&jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmVsZWFzZS1hc3NldHMuZ2l0aHVidXNlcmNvbnRlbnQuY29tIiwia2V5Ijoia2V5MSIsImV4cCI6MTc5MDkwMzA3OSwibmJmIjoxNzkwODk5NDc5LCJwYXRoIjoicmVsZWFzZWFzc2V0cHJvZHVjdGlvbi5ibG9iLmNvcmUud2luZG93cy5uZXQifQ.Hpn2A4a-oZwT4fGxxzBeENYv2rkcsRMJVQmv4UISWbM&response-content-disposition=attachment%3B filename%3DLunaris-3.12-GSI_treble_arm64-ab-GAPPS-Official-20260920.img.xz&response-content-type=application%2Foctet-stream"
-      output_name:
+        default: "https://github.com/Doze-off/Lunaris-AOSP_gsi/releases/download/2026-09-20/Lunaris-3.12-GSI_treble_arm64-ab-GAPPS-Official-20260920.img.xz"   
+        output_name:
         description: "📛 Output GSI name"
         required: true
         default: "Lunaris_Pixel7_eSIM_GSI"
