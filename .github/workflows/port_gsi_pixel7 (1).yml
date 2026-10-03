@@ -48,12 +48,6 @@ jobs:
       - name: "Checkout repository"
         uses: actions/checkout@v5
 
-      - name: "Free runner disk space"
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift || true
-          sudo docker image prune --all --force || true
-          df -h /
 
       - name: "Install dependencies"
         run: |
