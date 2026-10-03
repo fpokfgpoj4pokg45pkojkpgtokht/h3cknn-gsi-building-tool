@@ -1,679 +1,635 @@
-name: "🔧 Lunaris GSI → Pixel 7 (eSIM)"
+name: "crDroid + Infinity X Custom Merge → Pixel 7"
 
 on:
   workflow_dispatch:
     inputs:
-      rom_url:
-        description: "📥 Direct URL to the GSI (.img.xz / .img)"
+      crdroid_url:
+        description: "crDroid Pixel 7 OTA ZIP"
         required: true
         type: string
-        default: "https://github.com/Doze-off/Lunaris-AOSP_gsi/releases/download/2026-09-20/Lunaris-3.12-GSI_treble_arm64-ab-GAPPS-Official-20260920.img.xz"
+        default: "https://cfhcable.dl.sourceforge.net/project/crdroid/panther/12.x/crDroidAndroid-16.0-20260913-panther-v12.12.zip?viasf=1&fid=0b1db699f8fcfb56&e=1791134595&st=HYy3ykqx0ckhpFKMA0nj-g"
+      infinityx_url:
+        description: "Infinity X Pixel 7 GAPPS OTA ZIP"
+        required: true
+        type: string
+        default: "https://gigenet.dl.sourceforge.net/project/infinity-x/panther/16/gapps/Project_Infinity-X-3.12-panther-26.08.2026-GAPPS-OFFICIAL.zip?viasf=1&fid=1961a3e072f3cc70&e=1791134670&st=dkU2Q1WZ5dZDXAju0w2Pzw"
       output_name:
-        description: "📛 Output GSI name"
+        description: "Output name"
         required: true
-        default: "Lunaris_Pixel7_eSIM_GSI"
         type: string
-      fs_type:
-        description: "💾 Output filesystem"
+        default: "crDroid-InfinityX-Pixel7"
+      systemui_mode:
+        description: "Infinity X SystemUI behavior"
         required: true
-        default: "ext4"
         type: choice
+        default: "swap-if-compatible"
         options:
-          - "ext4"
-          - "erofs"
-      require_esim_stack:
-        description: "📶 Fail the build if no eUICC (eSIM) app is found in the image"
+          - "keep-crdroid"
+          - "swap-if-compatible"
+      build_firmware_bundle:
+        description: "Download matching Pixel 7 factory firmware and make a flash bundle"
         required: true
-        default: true
         type: boolean
-      factory_image_url:
-        description: "📱 Pixel 7 (panther) factory image ZIP (stock kernel, vendor, vbmeta). Default: Android 16 QPR2 (BP4A.251205.006). Clear the field to skip."
+        default: true
+      factory_url:
+        description: "Pixel 7 factory image ZIP"
         required: false
+        type: string
         default: "https://dl.google.com/dl/android/aosp/panther-bp4a.251205.006-factory-4455f800.zip"
-        type: string
-      inject_stock_euicc:
-        description: "📶 If the GSI has no eUICC (eSIM) app, pull EuiccGoogle/EuiccSupportPixel from the Pixel 7 factory image and add them"
-        required: true
-        default: true
-        type: boolean
-      include_vendor_images:
-        description: "🧩 Also bundle stock vendor/odm/dlkm images (recommended: fixes lock screen / KeyMint mismatches)"
-        required: true
-        default: true
-        type: boolean
-      include_bootloader_radio:
-        description: "🔌 Also bundle the factory bootloader + radio and flash them FIRST (syncs the Trusty/KeyMint/Gatekeeper TEE firmware with the vendor image; a common cause of a dead lock screen). Pixel 7 has anti-rollback: the factory image must not be older than what the phone runs now."
-        required: true
-        default: true
-        type: boolean
-      custom_kernel_boot_url:
-        description: "🧬 Optional: URL to a custom-kernel boot.img for panther (replaces the stock boot.img in the bundle)"
-        required: false
-        default: ""
-        type: string
 
 jobs:
-  port_gsi:
+  merge_roms:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
-    concurrency:
-      group: port-gsi-pixel7
-      cancel-in-progress: false
+    timeout-minutes: 240
     permissions:
       contents: write
 
     steps:
-      - name: "📦 Checkout Repository"
+      - name: "Checkout repository"
         uses: actions/checkout@v5
 
-      - name: "🧹 Free Runner Disk Space"
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift || true
-          sudo docker image prune --all --force || true
-          df -h /
 
-      - name: "⚙️ Install Dependencies"
+      - name: "Install dependencies"
         run: |
           sudo apt-get update
-          sudo apt-get install -y xz-utils android-sdk-libsparse-utils e2fsprogs \
-            erofs-utils rsync attr xxd file unzip zip
+          sudo apt-get install -y \
+            android-sdk-libsparse-utils \
+            e2fsprogs \
+            erofs-utils \
+            attr \
+            rsync \
+            xxd \
+            file \
+            unzip \
+            zip \
+            p7zip-full \
+            jq \
+            curl \
+            wget \
+            python3 \
+            python3-pip \
+            openjdk-17-jre-headless \
+            lz4
 
-      - name: "📥 Fetch Pixel 7 Stock Firmware & Extract eUICC Apps"
-        env:
-          FACTORY_URL: ${{ inputs.factory_image_url }}
-          INJECT_EUICC: ${{ inputs.inject_stock_euicc }}
+          sudo apt-get clean
+
+      - name: "Install APK tooling"
         run: |
           set -euo pipefail
-          W="$GITHUB_WORKSPACE/workspace"
-          F="$W/factory"; E="$W/euicc"
-          mkdir -p "$F" "$E"
-          cd "$F"
-          hex_at() { dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null | xxd -p; }
+          mkdir -p "$GITHUB_WORKSPACE/tools"
 
-          if [ -z "$FACTORY_URL" ]; then
-            echo "::warning::No factory_image_url: skipping stock firmware (no kernel/vendor bundle, no eUICC extraction)."
-            exit 0
+          # Apktool
+          APKTOOL_VERSION="2.10.0"
+          curl -fL --retry 5 --retry-all-errors \
+            -o "$GITHUB_WORKSPACE/tools/apktool.jar" \
+            "https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VERSION}/apktool_${APKTOOL_VERSION}.jar"
+
+          # apktool needs a framework-aware Java environment.
+          java -version
+          java -jar "$GITHUB_WORKSPACE/tools/apktool.jar" --version
+
+          # zipalign is normally supplied by Android build-tools. Download a
+          # small command-line copy if the runner does not already have it.
+          if ! command -v zipalign >/dev/null 2>&1; then
+            echo "::warning::zipalign is not installed on the runner."
+            echo "The merge script can still fall back to an unaligned APK."
           fi
 
-          curl -fL --retry 5 --retry-delay 5 --retry-all-errors -o factory.zip "$FACTORY_URL"
-
-          # Integrity check: Google factory ZIP names end in the first 8 hex chars of the SHA-256
-          EXPECTED=$(basename "${FACTORY_URL%%\?*}" | sed -nE 's/.*-factory-([0-9a-f]{8})\.zip$/\1/p')
-          if [ -n "$EXPECTED" ]; then
-            ACTUAL=$(sha256sum factory.zip | cut -c1-8)
-            if [ "$ACTUAL" != "$EXPECTED" ]; then
-              echo "::error::Factory image checksum mismatch (expected $EXPECTED..., got $ACTUAL...). Wrong URL or corrupted download."
-              exit 1
-            fi
-            echo "Factory image checksum OK ($ACTUAL)"
-          fi
-
-          unzip -q factory.zip -d fx
-          rm -f factory.zip
-          IMGZIP=$(find fx -name 'image-panther-*.zip' | head -n1)
-          if [ -z "$IMGZIP" ]; then
-            echo "::error::No image-panther-*.zip inside the factory image. This must be the Pixel 7 (panther) factory ZIP, not a Pixel 7 Pro (cheetah) or 7a (lynx) one."
+      - name: "Verify merge script"
+        run: |
+          set -euo pipefail
+          if [ ! -f graft_apk.py ]; then
+            echo "::error::graft_apk.py is missing from the repository."
+            echo "Put the supplied graft_apk.py next to this workflow."
             exit 1
           fi
-          # Bootloader + radio live in the OUTER zip, next to image-panther-*.zip.
-          # Keep them: the Trusty TEE (KeyMint/Gatekeeper) ships inside bootloader.img.
-          mkdir -p "$F/fw"
-          find fx -maxdepth 3 -type f \( -name 'bootloader-panther-*.img' -o -name 'radio-panther-*.img' \) \
-            -exec cp {} "$F/fw/" \;
-          ls -l "$F/fw" || true
-          unzip -q "$IMGZIP" -d img
-          rm -rf fx
+          python3 -m py_compile graft_apk.py
 
-          # ---- Extract the eUICC apps from the stock Pixel 7 system partitions ----
-          if [ "$INJECT_EUICC" = "true" ]; then
-            for part in system_ext product system; do
-              f="img/$part.img"
-              [ -f "$f" ] || continue
-              R="$f"
-              if [ "$(hex_at "$f" 0 4)" = "ed26ff3a" ]; then
-                R="$F/$part.raw"; simg2img "$f" "$R"
-              fi
-              M="$F/mnt_$part"; mkdir -p "$M"
-              if ! sudo mount -o loop,ro "$R" "$M"; then
-                echo "::warning::Could not mount stock $part.img; skipping it"
-                continue
-              fi
-              BASE="$M"
-              [ "$part" = "system" ] && [ -f "$M/system/build.prop" ] && BASE="$M/system"
-
-              for d in "$BASE"/priv-app/*[Ee]uicc* "$BASE"/app/*[Ee]uicc*; do
-                [ -d "$d" ] || continue
-                kind=$(basename "$(dirname "$d")")
-                mkdir -p "$E/$part/$kind"
-                sudo cp -a "$d" "$E/$part/$kind/"
-                echo "extracted $part/$kind/$(basename "$d")"
-              done
-
-              # Related permission / sysconfig files named *euicc*
-              for sub in permissions sysconfig; do
-                if [ -d "$BASE/etc/$sub" ]; then
-                  mkdir -p "$E/$part/etc/$sub"
-                  find "$BASE/etc/$sub" -maxdepth 1 -type f -iname '*euicc*' \
-                    -exec sudo cp -a {} "$E/$part/etc/$sub/" \;
-                fi
-              done
-
-              # Pull only the eUICC <privapp-permissions> entries out of the shared allowlists
-              if [ -d "$BASE/etc/permissions" ]; then
-                python3 - "$BASE/etc/permissions" "$E/$part/etc/permissions/privapp-permissions-stock-euicc.xml" <<'PY'
-          import sys, glob, os
-          import xml.etree.ElementTree as ET
-          src, dst = sys.argv[1:3]
-          out = ET.Element("permissions"); n = 0
-          for f in sorted(glob.glob(os.path.join(src, "privapp-permissions*.xml"))):
-              try:
-                  root = ET.parse(f).getroot()
-              except Exception:
-                  continue
-              for el in root.iter("privapp-permissions"):
-                  if "euicc" in el.get("package", "").lower():
-                      out.append(el); n += 1
-          if n:
-              os.makedirs(os.path.dirname(dst), exist_ok=True)
-              ET.ElementTree(out).write(dst, encoding="utf-8", xml_declaration=True)
-              print("privapp-permissions entries extracted:", n)
-          PY
-              fi
-
-              sudo umount "$M"
-              rm -f "$F/$part.raw"
-            done
-
-            sudo chown -R "$USER" "$E"
-            # Stale odex/vdex from the stock ART build must not be reused; let the device dexopt
-            find "$E" -type d -name oat -prune -exec rm -rf {} + 2>/dev/null || true
-            echo "::group::Extracted eUICC files"
-            (cd "$E" && find . -type f | sort) || true
-            echo "::endgroup::"
-          fi
-
-          # The big stock system partitions are no longer needed; free the disk space
-          rm -f img/system.img img/system_ext.img img/product.img
-          df -h /
-
-      - name: "🚀 Download, Patch & Repack GSI"
+      - name: "Download crDroid and Infinity X OTA ZIPs"
         env:
-          INPUT_ROM_URL: ${{ inputs.rom_url }}
-          INPUT_OUTPUT_NAME: ${{ inputs.output_name }}
-          INPUT_FS_TYPE: ${{ inputs.fs_type }}
-          INPUT_REQUIRE_ESIM: ${{ inputs.require_esim_stack }}
-          INPUT_INJECT_EUICC: ${{ inputs.inject_stock_euicc }}
+          CRDROID_URL: ${{ inputs.crdroid_url }}
+          INFINITYX_URL: ${{ inputs.infinityx_url }}
         run: |
           set -euo pipefail
-          W="$GITHUB_WORKSPACE/workspace"
-          T="$W/tmp"; MNT="$W/mnt"; SRC="$W/src"; OUT="$W/output"
-          mkdir -p "$T" "$MNT" "$SRC" "$OUT"
-          cd "$T"
 
-          hex_at() { dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null | xxd -p; }
+          mkdir -p workspace/downloads
 
-          # ---------- 1. Download ----------
-          echo "::group::Download"
-          curl -fL --retry 5 --retry-delay 5 --retry-all-errors \
-            -o rom.download "$INPUT_ROM_URL"
-          ls -lh rom.download
+          curl -fL --retry 8 --retry-delay 5 --retry-all-errors \
+            -o workspace/downloads/crdroid.zip "$CRDROID_URL"
+
+          curl -fL --retry 8 --retry-delay 5 --retry-all-errors \
+            -o workspace/downloads/infinityx.zip "$INFINITYX_URL"
+
+          echo "Downloaded:"
+          ls -lh workspace/downloads/
+
+      - name: "Extract payload.bin from both OTAs"
+        run: |
+          set -euo pipefail
+
+          mkdir -p workspace/crdroid_ota workspace/infinityx_ota
+
+          unzip -q workspace/downloads/crdroid.zip \
+            -d workspace/crdroid_ota
+
+          unzip -q workspace/downloads/infinityx.zip \
+            -d workspace/infinityx_ota
+
+          find workspace/crdroid_ota -type f -name payload.bin -print
+          find workspace/infinityx_ota -type f -name payload.bin -print
+
+          CR_PAYLOAD="$(find workspace/crdroid_ota -type f -name payload.bin | head -n1)"
+          IX_PAYLOAD="$(find workspace/infinityx_ota -type f -name payload.bin | head -n1)"
+
+          if [ -z "$CR_PAYLOAD" ]; then
+            echo "::error::No crDroid payload.bin was found."
+            exit 1
+          fi
+
+          if [ -z "$IX_PAYLOAD" ]; then
+            echo "::error::No Infinity X payload.bin was found."
+            exit 1
+          fi
+
+          cp "$CR_PAYLOAD" workspace/crdroid_payload.bin
+          cp "$IX_PAYLOAD" workspace/infinityx_payload.bin
+
+      - name: "Install payload-dumper-go"
+        run: |
+          set -euo pipefail
+
+          mkdir -p tools/payload
+
+          API_JSON="$(curl -fsSL \
+            -H 'Accept: application/vnd.github+json' \
+            https://api.github.com/repos/ssut/payload-dumper-go/releases/latest)"
+
+          TAG="$(echo "$API_JSON" | jq -r '.tag_name')"
+          echo "payload-dumper-go release: $TAG"
+
+          ASSET_URL="$(echo "$API_JSON" | jq -r '
+            .assets[]
+            | select(.name | test("linux.*amd64|Linux.*amd64|linux.*x86_64"; "i"))
+            | .browser_download_url
+          ' | head -n1)"
+
+          if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" = "null" ]; then
+            echo "::error::Could not find a Linux amd64 payload-dumper-go release."
+            echo "$API_JSON" | jq -r '.assets[].name'
+            exit 1
+          fi
+
+          curl -fL --retry 5 --retry-all-errors \
+            -o tools/payload/payload-dumper.tar.gz "$ASSET_URL"
+
+          tar -xzf tools/payload/payload-dumper.tar.gz \
+            -C tools/payload
+
+          PAYLOAD_BIN="$(find tools/payload -type f -perm -111 | head -n1)"
+          if [ -z "$PAYLOAD_BIN" ]; then
+            PAYLOAD_BIN="$(find tools/payload -type f -name 'payload-dumper-go' | head -n1)"
+          fi
+
+          if [ -z "$PAYLOAD_BIN" ]; then
+            echo "::error::payload-dumper-go binary was not found."
+            find tools/payload -maxdepth 3 -type f -print
+            exit 1
+          fi
+
+          chmod +x "$PAYLOAD_BIN"
+          echo "PAYLOAD_DUMPER=$GITHUB_WORKSPACE/$PAYLOAD_BIN" >> "$GITHUB_ENV"
+
+      - name: "Extract crDroid and Infinity X payloads"
+        run: |
+          set -euo pipefail
+
+          mkdir -p workspace/images/crdroid workspace/images/infinityx
+
+          "$PAYLOAD_DUMPER" \
+            -o workspace/images/crdroid \
+            workspace/crdroid_payload.bin
+
+          "$PAYLOAD_DUMPER" \
+            -o workspace/images/infinityx \
+            workspace/infinityx_payload.bin
+
+          echo "::group::crDroid extracted partitions"
+          find workspace/images/crdroid -maxdepth 1 -type f -printf '%f\n' | sort
           echo "::endgroup::"
 
-          if xz -t rom.download 2>/dev/null; then
-            xz -dc rom.download > rom.img
-          else
-            mv rom.download rom.img
-          fi
-          rm -f rom.download
-
-          # ---------- 2. Sparse -> raw ----------
-          if [ "$(hex_at rom.img 0 4)" = "ed26ff3a" ]; then
-            echo "Sparse image detected, converting to raw"
-            simg2img rom.img raw.img
-            mv raw.img rom.img
-          fi
-
-          # ---------- 3. Detect filesystem ----------
-          if [ "$(hex_at rom.img 1080 2)" = "53ef" ]; then
-            SRC_FS=ext4
-          elif [ "$(hex_at rom.img 1024 4)" = "e2e1f5e0" ]; then
-            SRC_FS=erofs
-          else
-            echo "::error::Unrecognized filesystem in source image"; exit 1
-          fi
-          echo "Source filesystem: $SRC_FS"
-
-          # ---------- 4. Copy the source into a fresh, writable ext4 image ----------
-          # The source is mounted READ-ONLY and copied out. This avoids e2fsck
-          # -E unshare_blocks / resize2fs on Android's deduplicated (shared_blocks)
-          # ext4 images, which is slow, needs free space and can fail or hang.
-          WORK="$T/work.img"
-          if [ "$SRC_FS" = "ext4" ]; then
-            sudo mount -t ext4 -o loop,ro,noload "$T/rom.img" "$SRC"
-          else
-            sudo mount -t erofs -o loop,ro "$T/rom.img" "$SRC"
-          fi
-          USED=$(sudo du -sb "$SRC" | cut -f1)
-          echo "Source content size: $(numfmt --to=iec-i --suffix=B "$USED")"
-          truncate -s $(( USED + USED/8 + 700*1024*1024 )) "$WORK"
-          mkfs.ext4 -q -b 4096 -L system -O ^has_journal "$WORK"
-          sudo mount -o loop,rw "$WORK" "$MNT"
-          sudo rsync -aHAX --numeric-ids "$SRC"/ "$MNT"/
-          sudo umount "$SRC"
-          rm -f "$T/rom.img"
-          df -h "$MNT"
-
-          # ---------- 5. Locate system root ----------
-          if [ -f "$MNT/system/build.prop" ]; then
-            SYS="$MNT/system"
-          elif [ -f "$MNT/build.prop" ]; then
-            SYS="$MNT"
-          else
-            echo "::error::build.prop not found"; sudo ls "$MNT"; exit 1
-          fi
-          BP="$SYS/build.prop"
-          getp() { sudo grep -m1 "^$1=" "$BP" | cut -d= -f2- || true; }
-
-          echo "::group::Source image info"
-          echo "Android : $(getp ro.build.version.release) (SDK $(getp ro.build.version.sdk))"
-          echo "ABI list: $(getp ro.system.product.cpu.abilist)"
-          echo "Fprint  : $(getp ro.system.build.fingerprint)"
+          echo "::group::Infinity X extracted partitions"
+          find workspace/images/infinityx -maxdepth 1 -type f -printf '%f\n' | sort
           echo "::endgroup::"
-          getp ro.build.version.sdk > "$W/gsi-sdk.txt"
-          getp ro.build.version.security_patch > "$W/gsi-patch.txt"
 
-          ABI="$(getp ro.system.product.cpu.abilist)$(getp ro.product.cpu.abilist)"
-          case "$ABI" in
-            *arm64-v8a*) ;;
-            *) echo "::error::Image is not arm64, Pixel 7 needs arm64"; exit 1 ;;
-          esac
+          test -f workspace/images/crdroid/system.img
+          test -f workspace/images/infinityx/system.img
 
-          # ---------- 6. eSIM (eUICC) support ----------
-          find_euicc() {
-            sudo find "$MNT" -maxdepth 7 \( -iname 'EuiccGoogle*' -o -iname 'EuiccSupportPixel*' \) \
-              -not -path '*/lib/*' -not -path '*/lib64/*' | head -n 20 || true
+      - name: "Delete OTA archives and payload directories"
+        run: |
+          set -euo pipefail
+
+          rm -f workspace/downloads/crdroid.zip
+          rm -f workspace/downloads/infinityx.zip
+
+          # The request is specifically to remove ./payload only when it exists.
+          if [ -d "./payload" ]; then
+            echo "Deleting ./payload"
+            rm -rf "./payload"
+          else
+            echo "No ./payload directory exists; leaving it untouched."
+          fi
+
+          # Also remove extracted OTA payload directories after their
+          # payload.bin files have been copied.
+          rm -rf workspace/crdroid_ota workspace/infinityx_ota
+          rm -f workspace/crdroid_payload.bin workspace/infinityx_payload.bin
+
+      - name: "Convert sparse images when necessary"
+        run: |
+          set -euo pipefail
+
+          hex4() {
+            dd if="$1" bs=1 count=4 2>/dev/null | xxd -p
           }
-          echo "::group::eSIM stack check"
-          EUICC_FOUND=$(find_euicc)
-          echo "Already in GSI: ${EUICC_FOUND:-<none>}"
 
-          if [ -z "$EUICC_FOUND" ] && [ "$INPUT_INJECT_EUICC" = "true" ] \
-             && [ -n "$(ls -A "$W/euicc" 2>/dev/null)" ]; then
-            echo "Injecting eUICC apps extracted from the Pixel 7 factory image"
-            for part_dir in "$W"/euicc/*/; do
-              part=$(basename "$part_dir")
-              if [ "$part" = "system" ]; then DEST="$SYS"; else DEST="$SYS/$part"; fi
-              sudo mkdir -p "$DEST"
-              sudo rsync -rlt --chown=0:0 --chmod=D755,F644 "$part_dir" "$DEST/"
-              while IFS= read -r rel; do
-                sudo setfattr -n security.selinux -v "u:object_r:system_file:s0" "$DEST/$rel" 2>/dev/null || true
-              done < <(cd "$part_dir" && find . -mindepth 1)
-              echo "  -> $DEST"
+          convert_tree() {
+            ROOT="$1"
+            for img in "$ROOT"/*.img; do
+              [ -f "$img" ] || continue
+
+              if [ "$(hex4 "$img")" = "ed26ff3a" ]; then
+                echo "Converting sparse image: $img"
+                simg2img "$img" "${img}.raw"
+                mv "${img}.raw" "$img"
+              fi
             done
-            EUICC_FOUND=$(find_euicc)
-            echo "Now in GSI: ${EUICC_FOUND:-<none>}"
-          fi
-          echo "::endgroup::"
+          }
 
-          if [ -z "$EUICC_FOUND" ]; then
-            if [ "$INPUT_REQUIRE_ESIM" = "true" ]; then
-              echo "::error::No eUICC/eSIM app found in the GSI and none could be extracted from the factory image (check factory_image_url and inject_stock_euicc)."
-              exit 1
+          convert_tree workspace/images/crdroid
+          convert_tree workspace/images/infinityx
+
+      - name: "Prepare writable ROM trees"
+        run: |
+          set -euo pipefail
+
+          W="$GITHUB_WORKSPACE/workspace"
+          mkdir -p "$W/mnt/cr_system" "$W/mnt/ix_system"
+          mkdir -p "$W/mnt/cr_system_ext" "$W/mnt/ix_system_ext"
+          mkdir -p "$W/mnt/cr_product" "$W/mnt/ix_product"
+          mkdir -p "$W/mnt/cr_framework" "$W/mnt/ix_framework"
+
+          mount_img() {
+            IMG="$1"
+            MNT="$2"
+
+            if [ ! -f "$IMG" ]; then
+              echo "::warning::Missing image: $IMG"
+              return 0
+            fi
+
+            if file "$IMG" | grep -qi 'EROFS'; then
+              sudo mount -t erofs -o loop,ro "$IMG" "$MNT"
             else
-              echo "::warning::No eUICC app found; eSIM will NOT work on this build."
+              sudo mount -t ext4 -o loop,ro,noload "$IMG" "$MNT"
             fi
+          }
+
+          mount_img "$W/images/crdroid/system.img" "$W/mnt/cr_system"
+          mount_img "$W/images/infinityx/system.img" "$W/mnt/ix_system"
+
+          if [ -f "$W/images/crdroid/system_ext.img" ]; then
+            mount_img "$W/images/crdroid/system_ext.img" "$W/mnt/cr_system_ext"
           fi
 
-          # Declare the eUICC feature at system level (Pixel 7 vendor already declares
-          # it too; this makes sure framework/LPA checks pass even if it is missing).
-          PERM_DIR="$SYS/etc/permissions"
-          sudo mkdir -p "$PERM_DIR"
-          sudo tee "$PERM_DIR/android.hardware.telephony.euicc.xml" >/dev/null <<'XML'
-          <?xml version="1.0" encoding="utf-8"?>
-          <permissions>
-              <feature name="android.hardware.telephony.euicc" />
-          </permissions>
-          XML
-          sudo chown 0:0 "$PERM_DIR/android.hardware.telephony.euicc.xml"
-          sudo chmod 644 "$PERM_DIR/android.hardware.telephony.euicc.xml"
-          sudo setfattr -n security.selinux -v "u:object_r:system_file:s0" \
-            "$PERM_DIR/android.hardware.telephony.euicc.xml" || \
-            echo "::warning::Could not set SELinux label on eUICC permission file"
-
-          # ---------- 7. Unmount & finalize ----------
-          sudo sync
-          sudo umount "$MNT"
-          set +e; e2fsck -fy "$WORK"; set -e
-
-          FINAL="$OUT/${INPUT_OUTPUT_NAME}.img"
-          if [ "$INPUT_FS_TYPE" = "erofs" ]; then
-            sudo mount -o loop,ro "$WORK" "$MNT"
-            sudo mkfs.erofs -zlz4hc -C16384 "$FINAL" "$MNT"
-            sudo umount "$MNT"
-            sudo chown "$USER" "$FINAL"
-            echo "erofs" > "$W/image-mode.txt"
-          else
-            resize2fs -M "$WORK"
-            BLOCKS=$(dumpe2fs -h "$WORK" 2>/dev/null | awk '/^Block count:/{print $3}')
-            BSIZE=$(dumpe2fs -h "$WORK" 2>/dev/null | awk '/^Block size:/{print $3}')
-            truncate -s $(( BLOCKS * BSIZE )) "$WORK"
-            mv "$WORK" "$FINAL"
-            echo "ext4" > "$W/image-mode.txt"
+          if [ -f "$W/images/infinityx/system_ext.img" ]; then
+            mount_img "$W/images/infinityx/system_ext.img" "$W/mnt/ix_system_ext"
           fi
-          rm -f "$WORK"
 
-          echo "Raw image: $(ls -lh "$FINAL" | awk '{print $5}')"
-          xz -T0 -6 -v "$FINAL"
-          ls -lh "$OUT"
+          if [ -f "$W/images/crdroid/product.img" ]; then
+            mount_img "$W/images/crdroid/product.img" "$W/mnt/cr_product"
+          fi
 
-      - name: "📱 Build Pixel 7 Firmware Bundle (kernel, vendor, vbmeta)"
-        env:
-          FACTORY_URL: ${{ inputs.factory_image_url }}
-          INCLUDE_VENDOR: ${{ inputs.include_vendor_images }}
-          CUSTOM_BOOT_URL: ${{ inputs.custom_kernel_boot_url }}
-          INCLUDE_BL: ${{ inputs.include_bootloader_radio }}
-          INPUT_OUTPUT_NAME: ${{ inputs.output_name }}
+          if [ -f "$W/images/infinityx/product.img" ]; then
+            mount_img "$W/images/infinityx/product.img" "$W/mnt/ix_product"
+          fi
+
+      - name: "Create writable copies"
         run: |
           set -euo pipefail
+
           W="$GITHUB_WORKSPACE/workspace"
-          B="$W/bundle"; F="$W/factory"; OUT="$W/output"
-          mkdir -p "$B" "$F"
-          cd "$F"
-          hex_at() { dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null | xxd -p; }
+          mkdir -p "$W/tree/crdroid" "$W/tree/infinityx"
 
-          if [ ! -d "$F/img" ]; then
-            echo "::warning::No stock firmware was fetched: skipping the Pixel 7 firmware bundle. You must already be on matching stock firmware, or the lock screen / eSIM may not work."
-            exit 0
-          fi
+          copy_tree() {
+            SRC="$1"
+            DST="$2"
 
-          # ---- Kernel / boot-chain images (these are what provide the kernel) ----
-          for p in boot init_boot vendor_boot vendor_kernel_boot dtbo pvmfw vbmeta vbmeta_system vbmeta_vendor; do
-            [ -f "img/$p.img" ] && cp "img/$p.img" "$B/$p.img" && echo "bundled $p.img"
-          done
-
-          # ---- Optional custom kernel ----
-          if [ -n "$CUSTOM_BOOT_URL" ]; then
-            cp "$B/boot.img" "$B/boot_stock.img"
-            curl -fL --retry 5 --retry-delay 5 -o "$B/boot.img" "$CUSTOM_BOOT_URL"
-            echo "::warning::Custom kernel boot.img used. Its modules must match the bundled vendor_dlkm/system_dlkm or the device may bootloop."
-          fi
-
-          # ---- Bootloader + radio (Trusty TEE with KeyMint/Gatekeeper TAs, modem) ----
-          if [ "$INCLUDE_BL" = "true" ]; then
-            for f in "$F"/fw/*.img; do
-              [ -f "$f" ] || continue
-              case "$(basename "$f")" in
-                bootloader-*) cp "$f" "$B/bootloader.img"; echo "bundled bootloader: $(basename "$f")" ;;
-                radio-*)      cp "$f" "$B/radio.img";      echo "bundled radio: $(basename "$f")" ;;
-              esac
-            done
-            ls -1 "$F/fw" > "$B/firmware-versions.txt" 2>/dev/null || true
-            [ -f "$B/bootloader.img" ] || echo "::warning::No bootloader image found in the factory ZIP; lock screen may stay broken if your phone's bootloader does not match this vendor image."
-          fi
-
-          # ---- Vendor-side images (HALs: KeyMint, Gatekeeper, Weaver, radio) ----
-          if [ "$INCLUDE_VENDOR" = "true" ]; then
-            for p in vendor vendor_dlkm system_dlkm odm odm_dlkm; do
-              [ -f "img/$p.img" ] && cp "img/$p.img" "$B/$p.img" && echo "bundled $p.img"
-            done
-
-            # Lock-screen preflight: compare GSI vs vendor API level and list security HALs
-            if [ -f "$B/vendor.img" ]; then
-              V="$B/vendor.img"
-              if [ "$(hex_at "$V" 0 4)" = "ed26ff3a" ]; then
-                simg2img "$V" "$F/vendor_raw.img"; V="$F/vendor_raw.img"
-              fi
-              mkdir -p "$F/vmnt"
-              if sudo mount -o loop,ro "$V" "$F/vmnt" 2>/dev/null; then
-                VSDK=$(sudo grep -m1 '^ro.vendor.build.version.sdk=' "$F/vmnt/build.prop" | cut -d= -f2- || true)
-                GSDK=$(cat "$W/gsi-sdk.txt" 2>/dev/null || echo unknown)
-                {
-                  echo "GSI SDK:    $GSDK"
-                  echo "Vendor SDK: ${VSDK:-unknown}"
-                  echo "Security HALs declared by vendor:"
-                  sudo grep -rhoE 'android\.hardware\.(gatekeeper|security\.keymint|security\.authgraph|weaver|security\.secureclock|security\.sharedsecret)' \
-                    "$F/vmnt/etc/vintf" 2>/dev/null | sort -u || true
-                } | tee "$B/vendor-compat.txt"
-                VPATCH=$(sudo grep -m1 '^ro.vendor.build.security_patch=' "$F/vmnt/build.prop" | cut -d= -f2- || true)
-                GPATCH=$(cat "$W/gsi-patch.txt" 2>/dev/null || true)
-                echo "Vendor patch level: ${VPATCH:-unknown} | GSI patch level: ${GPATCH:-unknown}"
-                if [ -n "$VPATCH" ] && [ -n "$GPATCH" ] && [[ "$GPATCH" < "$VPATCH" ]]; then
-                  echo "::warning::GSI security patch ($GPATCH) is OLDER than the vendor/boot patch ($VPATCH). KeyMint rejects patch-level downgrades, which breaks PIN/pattern/fingerprint. Use an older factory image or a newer GSI build."
-                fi
-                if [ -n "${VSDK:-}" ] && [ "$GSDK" != "unknown" ] && [ "$VSDK" != "$GSDK" ]; then
-                  echo "::warning::GSI SDK ($GSDK) differs from vendor SDK ($VSDK). Mismatched KeyMint/Gatekeeper HAL versions are the most common cause of broken lock screen on GSIs. Use a factory image matching the GSI's Android version if you hit this."
-                fi
-                sudo umount "$F/vmnt"
-              else
-                echo "::warning::Could not mount vendor.img for the compatibility preflight"
-              fi
-            fi
-          fi
-
-          # ---- Flash script ----
-          cat > "$B/flash_all.sh" <<'SH'
-          #!/usr/bin/env bash
-          # Pixel 7 (panther) GSI flasher. WIPES ALL DATA. Bootloader must be unlocked.
-          # Usage: ./flash_all.sh path/to/system.img [--delete-stock-product]
-          #   --delete-stock-product : also delete the stock product/system_ext logical
-          #   partitions so only the GSI's own copies are used (try this if the lock
-          #   screen is still broken after a normal flash).
-          set -eu
-          GSI="$(realpath "${1:?usage: ./flash_all.sh <system.img> [--delete-stock-product]}")"
-          CLEAN_PRODUCT=0
-          if [ "${2:-}" = "--delete-stock-product" ]; then CLEAN_PRODUCT=1; fi
-          cd "$(dirname "$0")"
-
-          wait_bootloader() {
-            local out
-            for _ in $(seq 60); do
-              out=$(fastboot getvar product 2>&1 || true)
-              case "$out" in *panther*) return 0 ;; esac
-              sleep 2
-            done
-            echo "Device did not show up in fastboot"; exit 1
-          }
-          wait_fastbootd() {
-            local out
-            for _ in $(seq 60); do
-              out=$(fastboot getvar is-userspace 2>&1 || true)
-              case "$out" in *"is-userspace: yes"*) return 0 ;; esac
-              sleep 2
-            done
-            echo "Device did not enter fastbootd"; exit 1
+            sudo rsync -aHAX --numeric-ids "$SRC"/ "$DST"/
+            sudo chown -R "$USER":"$USER" "$DST"
           }
 
-          out=$(fastboot getvar product 2>&1 || true)
-          case "$out" in *panther*) ;; *) echo "Not a Pixel 7 (panther), or device not in fastboot"; exit 1 ;; esac
+          copy_tree "$W/mnt/cr_system" "$W/tree/crdroid/system"
+          copy_tree "$W/mnt/ix_system" "$W/tree/infinityx/system"
 
-          # ---- 1. Bootloader + radio first (keeps the Trusty TEE in sync with vendor) ----
-          if [ -f bootloader.img ]; then
-            echo "Phone bootloader : $(fastboot getvar version-bootloader 2>&1 | head -n1)"
-            echo "Bundle firmware  : $(cat firmware-versions.txt 2>/dev/null | tr '\n' ' ')"
-            echo "Pixel 7 has anti-rollback. Flashing a bootloader OLDER than the one on the"
-            echo "phone can brick it. The bundle must be the same version or newer."
-            read -r -p "Continue? [y/N] " ans
-            case "$ans" in y|Y) ;; *) echo "Aborted."; exit 1 ;; esac
-            fastboot flash --slot=all bootloader bootloader.img
-            fastboot reboot bootloader
-            wait_bootloader
-          fi
-          if [ -f radio.img ]; then
-            fastboot flash --slot=all radio radio.img
-            fastboot reboot bootloader
-            wait_bootloader
+          if mountpoint -q "$W/mnt/cr_system_ext"; then
+            copy_tree "$W/mnt/cr_system_ext" "$W/tree/crdroid/system_ext"
+          else
+            mkdir -p "$W/tree/crdroid/system_ext"
           fi
 
-          # ---- 2. Boot chain (stock kernel / ramdisks) ----
-          for p in boot init_boot vendor_boot vendor_kernel_boot dtbo pvmfw; do
-            if [ -f "$p.img" ]; then fastboot flash --slot=all "$p" "$p.img"; fi
-          done
-          for p in vbmeta vbmeta_system vbmeta_vendor; do
-            if [ -f "$p.img" ]; then
-              fastboot flash --slot=all --disable-verity --disable-verification "$p" "$p.img"
-            fi
-          done
-
-          # ---- 3. Logical partitions (fastbootd) ----
-          fastboot reboot fastboot
-          wait_fastbootd
-          if [ "$CLEAN_PRODUCT" = 1 ]; then
-            for p in product system_ext; do
-              for s in a b; do fastboot delete-logical-partition "${p}_${s}" || true; done
-            done
+          if mountpoint -q "$W/mnt/ix_system_ext"; then
+            copy_tree "$W/mnt/ix_system_ext" "$W/tree/infinityx/system_ext"
+          else
+            mkdir -p "$W/tree/infinityx/system_ext"
           fi
-          for p in vendor vendor_dlkm system_dlkm odm odm_dlkm; do
-            if [ -f "$p.img" ]; then fastboot flash "$p" "$p.img"; fi
+
+          if mountpoint -q "$W/mnt/cr_product"; then
+            copy_tree "$W/mnt/cr_product" "$W/tree/crdroid/product"
+          else
+            mkdir -p "$W/tree/crdroid/product"
+          fi
+
+          if mountpoint -q "$W/mnt/ix_product"; then
+            copy_tree "$W/mnt/ix_product" "$W/tree/infinityx/product"
+          else
+            mkdir -p "$W/tree/infinityx/product"
+          fi
+
+          for M in \
+            "$W/mnt/cr_system" \
+            "$W/mnt/ix_system" \
+            "$W/mnt/cr_system_ext" \
+            "$W/mnt/ix_system_ext" \
+            "$W/mnt/cr_product" \
+            "$W/mnt/ix_product"; do
+            sudo umount "$M" 2>/dev/null || true
           done
-          fastboot flash system "$GSI"
 
-          # Wipe is REQUIRED: leftover encrypted userdata/metadata from another ROM breaks the lock screen.
-          fastboot -w
-          fastboot reboot
-          SH
-          chmod +x "$B/flash_all.sh"
-
-          cat > "$B/README.txt" <<EOF
-          Pixel 7 (panther) firmware bundle for ${INPUT_OUTPUT_NAME}
-          Extract ${INPUT_OUTPUT_NAME}.img.xz to system.img, then:
-            ./flash_all.sh /path/to/system.img
-          This wipes all data. Requires platform-tools and an unlocked bootloader.
-          If the lock screen is still broken: ./flash_all.sh /path/to/system.img --delete-stock-product
-          EOF
-
-          (cd "$B" && zip -qr "$OUT/${INPUT_OUTPUT_NAME}-pixel7-firmware.zip" .)
-          ls -lh "$OUT"
-          rm -rf "$F"
-
-      - name: "🔑 Checksums & Release Notes"
-        env:
-          INPUT_ROM_URL: ${{ inputs.rom_url }}
-          INPUT_OUTPUT_NAME: ${{ inputs.output_name }}
-          INPUT_FS_TYPE: ${{ inputs.fs_type }}
+      - name: "Prepare framework sets"
         run: |
           set -euo pipefail
-          cd workspace/output
-          shopt -s nullglob
-          sha256sum ./*.img.xz ./*.zip > SHA256SUMS.txt
-          HAS_BUNDLE=no
-          if ls ./*-pixel7-firmware.zip >/dev/null 2>&1; then HAS_BUNDLE=yes; fi
 
-          IMAGE_MODE=$(cat ../image-mode.txt 2>/dev/null || echo unknown)
-          RAW_BYTES=$(xz --robot --list ./*.img.xz | awk -F '\t' '$1 == "totals" { print $5 }')
-          RAW_SIZE=$(numfmt --to=iec-i --suffix=B "$RAW_BYTES")
-          RELEASE_TAG="v$(date +%Y.%m.%d-%H%M%S)-${GITHUB_RUN_ID}"
-          RELEASE_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/${RELEASE_TAG}"
+          W="$GITHUB_WORKSPACE/workspace"
 
-          # Do not publish the (signed) source URL's query string in release notes
-          SRC_CLEAN="${INPUT_ROM_URL%%\?*}"
+          mkdir -p "$W/framework/crdroid" "$W/framework/infinityx"
 
-          cat > build-info.txt <<EOF
-          GSI build report
-          ================
-          Output name: $INPUT_OUTPUT_NAME
-          Target device: Google Pixel 7 (panther, arm64, A/B, dynamic partitions)
-          Source: $SRC_CLEAN
-          Filesystem: $INPUT_FS_TYPE ($IMAGE_MODE)
-          Raw image size: $RAW_SIZE
-          eSIM: eUICC feature flag injected; requires an eUICC app in the image
-          Commit: $GITHUB_SHA
-          Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
-          Built at UTC: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          collect_framework() {
+            ROOT="$1"
+            OUT="$2"
 
-          Checksums:
-          $(cat SHA256SUMS.txt)
-          EOF
+            find "$ROOT" \
+              -type f \
+              \( -name '*.jar' -o -name '*-res.apk' \) \
+              -exec cp -n {} "$OUT/" \; || true
+          }
 
-          cat > release-notes.md <<EOF
-          ## ${INPUT_OUTPUT_NAME} - Pixel 7 GSI (eSIM)
+          collect_framework "$W/tree/crdroid/system/framework" "$W/framework/crdroid"
+          collect_framework "$W/tree/crdroid/system_ext/framework" "$W/framework/crdroid"
 
-          - **Source**: $SRC_CLEAN
-          - **Filesystem**: $INPUT_FS_TYPE
-          - **Raw image size**: $RAW_SIZE
-          - **Workflow run**: [$GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)
+          collect_framework "$W/tree/infinityx/system/framework" "$W/framework/infinityx"
+          collect_framework "$W/tree/infinityx/system_ext/framework" "$W/framework/infinityx"
 
-          ### Flashing on Pixel 7 (bootloader must be unlocked, WIPES DATA)
+          echo "::group::crDroid framework"
+          find "$W/framework/crdroid" -maxdepth 1 -type f -printf '%f\n' | sort
+          echo "::endgroup::"
 
-          Firmware bundle included in this release: **$HAS_BUNDLE**
+          echo "::group::Infinity X framework"
+          find "$W/framework/infinityx" -maxdepth 1 -type f -printf '%f\n' | sort
+          echo "::endgroup::"
 
-          1. Extract: \`xz -d ${INPUT_OUTPUT_NAME}.img.xz\`
-          2. If the bundle is present, unzip \`${INPUT_OUTPUT_NAME}-pixel7-firmware.zip\` and run
-             \`./flash_all.sh /path/to/${INPUT_OUTPUT_NAME}.img\`
-             (flashes stock kernel/boot chain, vbmeta with verification disabled, vendor
-             images, the GSI, then wipes data).
-          3. Without the bundle, do it manually: flash stock \`vbmeta.img\` with
-             \`--disable-verity --disable-verification\`, \`fastboot reboot fastboot\`,
-             \`fastboot flash system ${INPUT_OUTPUT_NAME}.img\`, \`fastboot -w\`, reboot.
+      - name: "Locate Settings and SystemUI"
+        run: |
+          set -euo pipefail
 
-          If flashing fails with "not enough space", delete unused logical partitions
-          (e.g. \`fastboot delete-logical-partition product_a\`) and retry.
+          W="$GITHUB_WORKSPACE/workspace"
 
-          ### Kernel
-          A GSI contains no kernel. The Pixel 7 kernel lives in boot/vendor_boot/vendor_dlkm,
-          which the bundle takes from the stock factory image (or a custom boot.img if you
-          supplied one; custom kernels must match the vendor_dlkm modules).
+          locate_app() {
+            ROOT="$1"
+            NAME="$2"
 
-          ### Lock screen (PIN / pattern / fingerprint)
-          Lock screen credentials rely on the vendor KeyMint, Gatekeeper and Weaver HALs,
-          which talk to the Trusty TEE inside the **bootloader** image. They break when the
-          bootloader/radio, vendor images and GSI do not match, when the GSI patch level is
-          older than the vendor patch level, or when old encrypted userdata is left on the
-          device. The bundle flashes bootloader + radio first, then vendor images, and wipes.
-          The build log prints a vendor-vs-GSI SDK and patch-level check.
-          Still broken? Re-run \`./flash_all.sh <img> --delete-stock-product\`.
-          Pixel 7 has anti-rollback: never flash a bundle older than your current firmware.
+            find "$ROOT" \
+              -type f \
+              -path '*/app/*' \
+              -o -type f \
+              -path '*/priv-app/*' \
+              | grep -E "/${NAME}$" | head -n1 || true
+          }
 
-          ### eSIM
-          Works only if the base build ships Google's eUICC app (the build checks this).
-          Add the eSIM from Settings > Network & internet > SIMs.
-          EOF
+          for ROM in crdroid infinityx; do
+            echo "===== $ROM ====="
+            find "$W/tree/$ROM" -type f \
+              \( -name 'Settings.apk' \
+              -o -name 'SettingsGoogle.apk' \
+              -o -name 'SystemUI.apk' \
+              -o -name 'SystemUIGoogle.apk' \) \
+              -print
+          done
 
-          cat > telegram-message.html <<EOF
-          <b>${INPUT_OUTPUT_NAME} (Pixel 7 GSI)</b>
-          <a href="${RELEASE_URL}">Open GitHub Release</a>
-          Filesystem: ${INPUT_FS_TYPE} | Size: ${RAW_SIZE}
-          EOF
+      - name: "Merge Infinity X customization into crDroid"
+        env:
+          SYSTEMUI_MODE: ${{ inputs.systemui_mode }}
+        run: |
+          set -euo pipefail
 
-          echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
+          W="$GITHUB_WORKSPACE/workspace"
 
-      - name: "📤 Upload to Actions Artifacts"
-        uses: actions/upload-artifact@v6
+          # The supplied graft_apk.py expects the APKs/frameworks to be
+          # reachable from system_ext. If a ROM stores them elsewhere,
+          # stage symlinks/copies in a temporary system_ext tree.
+          mkdir -p "$W/graft/crdroid/system_ext" "$W/graft/infinityx/system_ext"
+
+          rsync -a "$W/tree/crdroid/system_ext/" \
+            "$W/graft/crdroid/system_ext/" || true
+
+          rsync -a "$W/tree/infinityx/system_ext/" \
+            "$W/graft/infinityx/system_ext/" || true
+
+          find_app() {
+            ROOT="$1"
+            NAME="$2"
+            find "$ROOT" -type f \
+              \( -path '*/priv-app/*' -o -path '*/app/*' \) \
+              -name "$NAME" | head -n1 || true
+          }
+
+          stage_app() {
+            SOURCE_ROOT="$1"
+            STAGE_ROOT="$2"
+            NAME="$3"
+
+            SRC="$(find_app "$SOURCE_ROOT" "$NAME")"
+            [ -n "$SRC" ] || return 0
+
+            REL="${SRC#$SOURCE_ROOT/}"
+            DEST="$STAGE_ROOT/$REL"
+
+            mkdir -p "$(dirname "$DEST")"
+            cp -a "$SRC" "$DEST"
+            echo "Staged $NAME: $SRC"
+          }
+
+          stage_app "$W/tree/crdroid" "$W/graft/crdroid/system_ext" Settings.apk
+          stage_app "$W/tree/crdroid" "$W/graft/crdroid/system_ext" SettingsGoogle.apk
+          stage_app "$W/tree/infinityx" "$W/graft/infinityx/system_ext" Settings.apk
+          stage_app "$W/tree/infinityx" "$W/graft/infinityx/system_ext" SettingsGoogle.apk
+
+          stage_app "$W/tree/crdroid" "$W/graft/crdroid/system_ext" SystemUI.apk
+          stage_app "$W/tree/crdroid" "$W/graft/crdroid/system_ext" SystemUIGoogle.apk
+          stage_app "$W/tree/infinityx" "$W/graft/infinityx/system_ext" SystemUI.apk
+          stage_app "$W/tree/infinityx" "$W/graft/infinityx/system_ext" SystemUIGoogle.apk
+
+          set +e
+          python3 graft_apk.py \
+            --apktool "$GITHUB_WORKSPACE/tools/apktool.jar" \
+            --cr-sysext "$W/graft/crdroid/system_ext" \
+            --ix-sysext "$W/graft/infinityx/system_ext" \
+            --cr-fw "$W/framework/crdroid" \
+            --ix-fw "$W/framework/infinityx" \
+            --work "$W/merge" \
+            --settings graft \
+            --systemui "$SYSTEMUI_MODE"
+          STATUS=$?
+          set -e
+
+          # graft_apk.py is deliberately non-fatal. Even if a particular
+          # component cannot be merged, keep the crDroid APK.
+          echo "graft_apk.py exit status: $STATUS"
+
+          if [ -f "$W/merge/merge-report.txt" ]; then
+            cp "$W/merge/merge-report.txt" "$W/merge-report.txt"
+            cat "$W/merge-report.txt"
+          fi
+
+      - name: "Install merged Settings/SystemUI back into crDroid"
+        run: |
+          set -euo pipefail
+
+          W="$GITHUB_WORKSPACE/workspace"
+
+          if [ -f "$W/merge/settings/Settings.merged.apk" ]; then
+            CR_SETTINGS="$(find "$W/tree/crdroid" -type f -name 'Settings.apk' | head -n1 || true)"
+            if [ -n "$CR_SETTINGS" ]; then
+              cp "$W/merge/settings/Settings.merged.apk" "$CR_SETTINGS"
+              chmod 0644 "$CR_SETTINGS"
+              echo "Installed merged Settings.apk"
+            fi
+          fi
+
+          if [ -f "$W/merge/settings/Settings.merged.apk" ] && \
+             find "$W/tree/crdroid" -type f -name 'SettingsGoogle.apk' | grep -q .; then
+            echo "SettingsGoogle.apk exists separately; the supplied graft script's Settings path was used."
+          fi
+
+          if [ -f "$W/merge/SystemUI.swapped.apk" ]; then
+            CR_UI="$(find "$W/tree/crdroid" -type f \
+              \( -name 'SystemUI.apk' -o -name 'SystemUIGoogle.apk' \) | head -n1 || true)"
+            if [ -n "$CR_UI" ]; then
+              cp "$W/merge/SystemUI.swapped.apk" "$CR_UI"
+              chmod 0644 "$CR_UI"
+              echo "Installed compatible Infinity X SystemUI"
+            fi
+          fi
+
+      - name: "Merge safe Infinity X overlays and XML customization"
+        run: |
+          set -euo pipefail
+
+          W="$GITHUB_WORKSPACE/workspace"
+
+          merge_missing_tree() {
+            SRC="$1"
+            DST="$2"
+
+            [ -d "$SRC" ] || return 0
+            mkdir -p "$DST"
+
+            rsync -a \
+              --ignore-existing \
+              "$SRC"/ "$DST"/ || true
+          }
+
+          # Copy only files that do not already exist in crDroid.
+          # This preserves crDroid's base framework while exposing
+          # Infinity X-only overlays/configuration where names do not collide.
+          merge_missing_tree \
+            "$W/tree/infinityx/product/overlay" \
+            "$W/tree/crdroid/product/overlay"
+
+          merge_missing_tree \
+            "$W/tree/infinityx/product/etc/sysconfig" \
+            "$W/tree/crdroid/product/etc/sysconfig"
+
+          merge_missing_tree \
+            "$W/tree/infinityx/product/etc/permissions" \
+            "$W/tree/crdroid/product/etc/permissions"
+
+          merge_missing_tree \
+            "$W/tree/infinityx/system_ext/etc/sysconfig" \
+            "$W/tree/crdroid/system_ext/etc/sysconfig"
+
+          merge_missing_tree \
+            "$W/tree/infinityx/system_ext/etc/permissions" \
+            "$W/tree/crdroid/system_ext/etc/permissions"
+
+          # Remove stale compiled artifacts. Android will regenerate them.
+          find "$W/tree/crdroid" -type d \
+            \( -name oat -o -name dalvik-cache \) \
+            -prune -exec rm -rf {} + || true
+
+      - name: "Collect everything into one zip"
+        env:
+          OUTPUT_NAME: ${{ inputs.output_name }}
+        run: |
+          set -euo pipefail
+
+          W="$GITHUB_WORKSPACE/workspace"
+          STAGE="$W/final"
+          OUT="$GITHUB_WORKSPACE/out"
+          rm -rf "$STAGE" "$OUT"
+          mkdir -p "$STAGE" "$OUT"
+
+          # Merged crDroid tree (system, system_ext, product)
+          if [ -d "$W/tree/crdroid" ]; then
+            mkdir -p "$STAGE/merged_tree"
+            sudo rsync -a "$W/tree/crdroid/" "$STAGE/merged_tree/"
+          fi
+
+          # Merge reports and merged APKs from graft_apk.py
+          [ -f "$W/merge-report.txt" ] && cp "$W/merge-report.txt" "$STAGE/"
+          if [ -d "$W/merge" ]; then
+            mkdir -p "$STAGE/merge"
+            find "$W/merge" -maxdepth 3 -type f \
+              \( -name '*.apk' -o -name '*.txt' -o -name '*.log' \) \
+              -exec cp --parents {} "$STAGE/merge/" \; || true
+          fi
+
+          # Factory firmware bundle, if one was produced by an earlier step
+          for d in "$W/firmware" "$W/firmware_bundle" "$W/factory"; do
+            if [ -d "$d" ]; then
+              mkdir -p "$STAGE/firmware"
+              cp -a "$d"/. "$STAGE/firmware/"
+            fi
+          done
+
+          # Any raw partition images still on disk
+          if [ -d "$W/images" ]; then
+            mkdir -p "$STAGE/images"
+            cp -a "$W/images"/. "$STAGE/images/"
+          fi
+
+          sudo chown -R "$USER":"$USER" "$STAGE"
+
+          (cd "$STAGE" && zip -r -1 -q "$OUT/${OUTPUT_NAME}.zip" .)
+
+          echo "Final zip:"
+          ls -lh "$OUT"
+          unzip -l "$OUT/${OUTPUT_NAME}.zip" | tail -n 1
+
+      - name: "Upload zip"
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.output_name }}
-          path: |
-            workspace/output/*.img.xz
-            workspace/output/*.zip
-            workspace/output/SHA256SUMS.txt
-            workspace/output/build-info.txt
-          retention-days: 7
-
-      - name: "🏷️ Create GitHub Release"
-        uses: softprops/action-gh-release@v3.0.3
-        with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          name: "${{ inputs.output_name }} (Pixel 7 GSI)"
-          body_path: workspace/output/release-notes.md
-          files: |
-            workspace/output/*.img.xz
-            workspace/output/*.zip
-            workspace/output/SHA256SUMS.txt
-            workspace/output/build-info.txt
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: "📨 Sync release to Telegram"
-        if: success()
-        continue-on-error: true
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
-            echo "Telegram secrets not configured; skipping."
-            exit 0
-          fi
-          bash scripts/send_telegram_message.sh \
-            "$TELEGRAM_BOT_TOKEN" \
-            "$TELEGRAM_CHAT_ID" \
-            workspace/output/telegram-message.html
+          path: out/${{ inputs.output_name }}.zip
+          compression-level: 0
+          retention-days: 14
+          if-no-files-found: error
