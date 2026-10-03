@@ -1,0 +1,562 @@
+name: "crDroid + Infinity X Custom Merge → Pixel 7"
+
+on:
+  workflow_dispatch:
+    inputs:
+      crdroid_url:
+        description: "crDroid Pixel 7 OTA ZIP"
+        required: true
+        type: string
+        default: "https://cfhcable.dl.sourceforge.net/project/crdroid/panther/12.x/crDroidAndroid-16.0-20260913-panther-v12.12.zip?viasf=1&fid=0b1db699f8fcfb56&e=1791134595&st=HYy3ykqx0ckhpFKMA0nj-g"
+      infinityx_url:
+        description: "Infinity X Pixel 7 GAPPS OTA ZIP"
+        required: true
+        type: string
+        default: "https://gigenet.dl.sourceforge.net/project/infinity-x/panther/16/gapps/Project_Infinity-X-3.12-panther-26.08.2026-GAPPS-OFFICIAL.zip?viasf=1&fid=1961a3e072f3cc70&e=1791134670&st=dkU2Q1WZ5dZDXAju0w2Pzw"
+      output_name:
+        description: "Output name"
+        required: true
+        type: string
+        default: "crDroid-InfinityX-Pixel7"
+      systemui_mode:
+        description: "Infinity X SystemUI behavior"
+        required: true
+        type: choice
+        default: "merge-missing"
+        options:
+          - "keep-crdroid"
+          - "merge-missing"
+          - "swap-if-compatible"
+      build_firmware_bundle:
+        description: "Download matching Pixel 7 factory firmware and make a flash bundle"
+        required: true
+        type: boolean
+        default: true
+      factory_url:
+        description: "Pixel 7 factory image ZIP"
+        required: false
+        type: string
+        default: "https://dl.google.com/dl/android/aosp/panther-bp4a.251205.006-factory-4455f800.zip"
+
+jobs:
+  merge_roms:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    permissions:
+      contents: write
+
+    steps:
+      - name: "Checkout repository"
+        uses: actions/checkout@v5
+
+
+      - name: "Install dependencies"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            android-sdk-libsparse-utils \
+            e2fsprogs \
+            erofs-utils \
+            attr \
+            rsync \
+            xxd \
+            zipalign \
+            file \
+            unzip \
+            zip \
+            p7zip-full \
+            jq \
+            curl \
+            wget \
+            python3 \
+            python3-pip \
+            openjdk-17-jre-headless \
+            lz4
+
+          sudo apt-get clean
+
+      - name: "Install APK tooling"
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/tools"
+
+          # Apktool
+          APKTOOL_VERSION="2.10.0"
+          curl -fL --retry 5 --retry-all-errors \
+            -o "$GITHUB_WORKSPACE/tools/apktool.jar" \
+            "https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VERSION}/apktool_${APKTOOL_VERSION}.jar"
+
+          # apktool needs a framework-aware Java environment.
+          java -version
+          java -jar "$GITHUB_WORKSPACE/tools/apktool.jar" --version
+
+          # zipalign is normally supplied by Android build-tools. Download a
+          # small command-line copy if the runner does not already have it.
+          if ! command -v zipalign >/dev/null 2>&1; then
+            echo "::warning::zipalign is not installed on the runner."
+            echo "The merge script can still fall back to an unaligned APK."
+          fi
+
+      - name: "Verify merge script"
+        run: |
+          set -euo pipefail
+          if [ ! -f graft_apk.py ]; then
+            echo "::error::graft_apk.py is missing from the repository."
+            echo "Put the supplied graft_apk.py next to this workflow."
+            exit 1
+          fi
+          python3 -m py_compile graft_apk.py
+
+      - name: "Download crDroid and Infinity X OTA ZIPs"
+        env:
+          CRDROID_URL: ${{ inputs.crdroid_url }}
+          INFINITYX_URL: ${{ inputs.infinityx_url }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p workspace/downloads
+
+          curl -fL --retry 8 --retry-delay 5 --retry-all-errors \
+            -o workspace/downloads/crdroid.zip "$CRDROID_URL"
+
+          curl -fL --retry 8 --retry-delay 5 --retry-all-errors \
+            -o workspace/downloads/infinityx.zip "$INFINITYX_URL"
+
+          echo "Downloaded:"
+          ls -lh workspace/downloads/
+
+      - name: "Extract payload.bin from both OTAs"
+        run: |
+          set -euo pipefail
+
+          mkdir -p workspace/crdroid_ota workspace/infinityx_ota
+
+          unzip -q workspace/downloads/crdroid.zip \
+            -d workspace/crdroid_ota
+
+          unzip -q workspace/downloads/infinityx.zip \
+            -d workspace/infinityx_ota
+
+          find workspace/crdroid_ota -type f -name payload.bin -print
+          find workspace/infinityx_ota -type f -name payload.bin -print
+
+          CR_PAYLOAD="$(find workspace/crdroid_ota -type f -name payload.bin | head -n1)"
+          IX_PAYLOAD="$(find workspace/infinityx_ota -type f -name payload.bin | head -n1)"
+
+          if [ -z "$CR_PAYLOAD" ]; then
+            echo "::error::No crDroid payload.bin was found."
+            exit 1
+          fi
+
+          if [ -z "$IX_PAYLOAD" ]; then
+            echo "::error::No Infinity X payload.bin was found."
+            exit 1
+          fi
+
+          cp "$CR_PAYLOAD" workspace/crdroid_payload.bin
+          cp "$IX_PAYLOAD" workspace/infinityx_payload.bin
+
+      - name: "Install payload-dumper-go"
+        run: |
+          set -euo pipefail
+
+          mkdir -p tools/payload
+
+          API_JSON="$(curl -fsSL \
+            -H 'Accept: application/vnd.github+json' \
+            https://api.github.com/repos/ssut/payload-dumper-go/releases/latest)"
+
+          TAG="$(echo "$API_JSON" | jq -r '.tag_name')"
+          echo "payload-dumper-go release: $TAG"
+
+          ASSET_URL="$(echo "$API_JSON" | jq -r '
+            .assets[]
+            | select(.name | test("linux.*amd64|Linux.*amd64|linux.*x86_64"; "i"))
+            | .browser_download_url
+          ' | head -n1)"
+
+          if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" = "null" ]; then
+            echo "::error::Could not find a Linux amd64 payload-dumper-go release."
+            echo "$API_JSON" | jq -r '.assets[].name'
+            exit 1
+          fi
+
+          curl -fL --retry 5 --retry-all-errors \
+            -o tools/payload/payload-dumper.tar.gz "$ASSET_URL"
+
+          tar -xzf tools/payload/payload-dumper.tar.gz \
+            -C tools/payload
+
+          PAYLOAD_BIN="$(find tools/payload -type f -perm -111 | head -n1)"
+          if [ -z "$PAYLOAD_BIN" ]; then
+            PAYLOAD_BIN="$(find tools/payload -type f -name 'payload-dumper-go' | head -n1)"
+          fi
+
+          if [ -z "$PAYLOAD_BIN" ]; then
+            echo "::error::payload-dumper-go binary was not found."
+            find tools/payload -maxdepth 3 -type f -print
+            exit 1
+          fi
+
+          chmod +x "$PAYLOAD_BIN"
+          echo "PAYLOAD_DUMPER=$GITHUB_WORKSPACE/$PAYLOAD_BIN" >> "$GITHUB_ENV"
+
+      - name: "Extract crDroid and Infinity X payloads"
+        run: |
+          set -euo pipefail
+
+          mkdir -p workspace/images/crdroid workspace/images/infinityx
+
+          "$PAYLOAD_DUMPER" \
+            -o workspace/images/crdroid \
+            workspace/crdroid_payload.bin
+
+          "$PAYLOAD_DUMPER" \
+            -o workspace/images/infinityx \
+            workspace/infinityx_payload.bin
+
+          echo "::group::crDroid extracted partitions"
+          find workspace/images/crdroid -maxdepth 1 -type f -printf '%f\n' | sort
+          echo "::endgroup::"
+
+          echo "::group::Infinity X extracted partitions"
+          find workspace/images/infinityx -maxdepth 1 -type f -printf '%f\n' | sort
+          echo "::endgroup::"
+
+          test -f workspace/images/crdroid/system.img
+          test -f workspace/images/infinityx/system.img
+
+      - name: "Delete OTA archives and payload directories"
+        run: |
+          set -euo pipefail
+
+          rm -f workspace/downloads/crdroid.zip
+          rm -f workspace/downloads/infinityx.zip
+
+          # The request is specifically to remove ./payload only when it exists.
+          if [ -d "./payload" ]; then
+            echo "Deleting ./payload"
+            rm -rf "./payload"
+          else
+            echo "No ./payload directory exists; leaving it untouched."
+          fi
+
+          # Also remove extracted OTA payload directories after their
+          # payload.bin files have been copied.
+          rm -rf workspace/crdroid_ota workspace/infinityx_ota
+          rm -f workspace/crdroid_payload.bin workspace/infinityx_payload.bin
+
+      - name: "Convert sparse images when necessary"
+        run: |
+          set -euo pipefail
+
+          hex4() {
+            dd if="$1" bs=1 count=4 2>/dev/null | xxd -p
+          }
+
+          convert_tree() {
+            ROOT="$1"
+            for img in "$ROOT"/*.img; do
+              [ -f "$img" ] || continue
+
+              if [ "$(hex4 "$img")" = "ed26ff3a" ]; then
+                echo "Converting sparse image: $img"
+                simg2img "$img" "${img}.raw"
+                mv "${img}.raw" "$img"
+              fi
+            done
+          }
+
+          convert_tree workspace/images/crdroid
+          convert_tree workspace/images/infinityx
+
+      - name: "Prepare writable ROM trees"
+        run: |
+          set -euo pipefail
+
+          W="$GITHUB_WORKSPACE/workspace"
+          mkdir -p "$W/mnt/cr_system" "$W/mnt/ix_system"
+          mkdir -p "$W/mnt/cr_system_ext" "$W/mnt/ix_system_ext"
+          mkdir -p "$W/mnt/cr_product" "$W/mnt/ix_product"
+          mkdir -p "$W/mnt/cr_framework" "$W/mnt/ix_framework"
+
+          mount_img() {
+            IMG="$1"
+            MNT="$2"
+
+            if [ ! -f "$IMG" ]; then
+              echo "::warning::Missing image: $IMG"
+              return 0
+            fi
+
+            if file "$IMG" | grep -qi 'EROFS'; then
+              sudo mount -t erofs -o loop,ro "$IMG" "$MNT"
+            else
+              sudo mount -t ext4 -o loop,ro,noload "$IMG" "$MNT"
+            fi
+          }
+
+          mount_img "$W/images/crdroid/system.img" "$W/mnt/cr_system"
+          mount_img "$W/images/infinityx/system.img" "$W/mnt/ix_system"
+
+          if [ -f "$W/images/crdroid/system_ext.img" ]; then
+            mount_img "$W/images/crdroid/system_ext.img" "$W/mnt/cr_system_ext"
+          fi
+
+          if [ -f "$W/images/infinityx/system_ext.img" ]; then
+            mount_img "$W/images/infinityx/system_ext.img" "$W/mnt/ix_system_ext"
+          fi
+
+          if [ -f "$W/images/crdroid/product.img" ]; then
+            mount_img "$W/images/crdroid/product.img" "$W/mnt/cr_product"
+          fi
+
+          if [ -f "$W/images/infinityx/product.img" ]; then
+            mount_img "$W/images/infinityx/product.img" "$W/mnt/ix_product"
+          fi
+
+      - name: "Create writable copies"
+        run: |
+          set -euo pipefail
+
+          W="$GITHUB_WORKSPACE/workspace"
+          mkdir -p "$W/tree/crdroid" "$W/tree/infinityx"
+
+          copy_tree() {
+            SRC="$1"
+            DST="$2"
+
+            sudo rsync -aHAX --numeric-ids "$SRC"/ "$DST"/
+            sudo chown -R "$USER":"$USER" "$DST"
+          }
+
+          copy_tree "$W/mnt/cr_system" "$W/tree/crdroid/system"
+          copy_tree "$W/mnt/ix_system" "$W/tree/infinityx/system"
+
+          if mountpoint -q "$W/mnt/cr_system_ext"; then
+            copy_tree "$W/mnt/cr_system_ext" "$W/tree/crdroid/system_ext"
+          else
+            mkdir -p "$W/tree/crdroid/system_ext"
+          fi
+
+          if mountpoint -q "$W/mnt/ix_system_ext"; then
+            copy_tree "$W/mnt/ix_system_ext" "$W/tree/infinityx/system_ext"
+          else
+            mkdir -p "$W/tree/infinityx/system_ext"
+          fi
+
+          if mountpoint -q "$W/mnt/cr_product"; then
+            copy_tree "$W/mnt/cr_product" "$W/tree/crdroid/product"
+          else
+            mkdir -p "$W/tree/crdroid/product"
+          fi
+
+          if mountpoint -q "$W/mnt/ix_product"; then
+            copy_tree "$W/mnt/ix_product" "$W/tree/infinityx/product"
+          else
+            mkdir -p "$W/tree/infinityx/product"
+          fi
+
+          for M in \
+            "$W/mnt/cr_system" \
+            "$W/mnt/ix_system" \
+            "$W/mnt/cr_system_ext" \
+            "$W/mnt/ix_system_ext" \
+            "$W/mnt/cr_product" \
+            "$W/mnt/ix_product"; do
+            sudo umount "$M" 2>/dev/null || true
+          done
+
+      - name: "Prepare framework sets"
+        run: |
+          set -euo pipefail
+
+          W="$GITHUB_WORKSPACE/workspace"
+
+          mkdir -p "$W/framework/crdroid" "$W/framework/infinityx"
+
+          collect_framework() {
+            ROOT="$1"
+            OUT="$2"
+
+            find "$ROOT" \
+              -type f \
+              \( -name '*.jar' -o -name '*-res.apk' \) \
+              -exec cp -n {} "$OUT/" \; || true
+          }
+
+          collect_framework "$W/tree/crdroid/system/framework" "$W/framework/crdroid"
+          collect_framework "$W/tree/crdroid/system_ext/framework" "$W/framework/crdroid"
+
+          collect_framework "$W/tree/infinityx/system/framework" "$W/framework/infinityx"
+          collect_framework "$W/tree/infinityx/system_ext/framework" "$W/framework/infinityx"
+
+          echo "::group::crDroid framework"
+          find "$W/framework/crdroid" -maxdepth 1 -type f -printf '%f\n' | sort
+          echo "::endgroup::"
+
+          echo "::group::Infinity X framework"
+          find "$W/framework/infinityx" -maxdepth 1 -type f -printf '%f\n' | sort
+          echo "::endgroup::"
+
+      - name: "Locate Settings and SystemUI"
+        run: |
+          set -euo pipefail
+
+          W="$GITHUB_WORKSPACE/workspace"
+
+          locate_app() {
+            ROOT="$1"
+            NAME="$2"
+
+            find "$ROOT" \
+              -type f \
+              -path '*/app/*' \
+              -o -type f \
+              -path '*/priv-app/*' \
+              | grep -E "/${NAME}$" | head -n1 || true
+          }
+
+          for ROM in crdroid infinityx; do
+            echo "===== $ROM ====="
+            find "$W/tree/$ROM" -type f \
+              \( -name 'Settings.apk' \
+              -o -name 'SettingsGoogle.apk' \
+              -o -name 'SystemUI.apk' \
+              -o -name 'SystemUIGoogle.apk' \) \
+              -print
+          done
+
+      - name: "Merge Infinity X into crDroid (additive, only missing parts)"
+        env:
+          SYSTEMUI_MODE: ${{ inputs.systemui_mode }}
+        run: |
+          set -euo pipefail
+          W="$GITHUB_WORKSPACE/workspace"
+
+          # graft_apk.py edits the crDroid tree in place: Settings, SystemUI and
+          # framework jars. Only things crDroid lacks are added; originals stay.
+          set +e
+          python3 graft_apk.py \
+            --apktool "$GITHUB_WORKSPACE/tools/apktool.jar" \
+            --cr-tree "$W/tree/crdroid" \
+            --ix-tree "$W/tree/infinityx" \
+            --cr-fw "$W/framework/crdroid" \
+            --ix-fw "$W/framework/infinityx" \
+            --work "$W/merge" \
+            --settings graft \
+            --systemui "$SYSTEMUI_MODE" \
+            --framework add \
+            --guard on
+          STATUS=$?
+          set -e
+          echo "graft_apk.py exit status: $STATUS"
+
+          if [ -f "$W/merge/merge-report.txt" ]; then
+            cp "$W/merge/merge-report.txt" "$W/merge-report.txt"
+            cat "$W/merge-report.txt"
+          fi
+
+      - name: "Merge safe Infinity X overlays and XML customization"
+        run: |
+          set -euo pipefail
+
+          W="$GITHUB_WORKSPACE/workspace"
+
+          merge_missing_tree() {
+            SRC="$1"
+            DST="$2"
+
+            [ -d "$SRC" ] || return 0
+            mkdir -p "$DST"
+
+            rsync -a \
+              --ignore-existing \
+              "$SRC"/ "$DST"/ || true
+          }
+
+          # Copy only files that do not already exist in crDroid.
+          # This preserves crDroid's base framework while exposing
+          # Infinity X-only overlays/configuration where names do not collide.
+          merge_missing_tree \
+            "$W/tree/infinityx/product/overlay" \
+            "$W/tree/crdroid/product/overlay"
+
+          merge_missing_tree \
+            "$W/tree/infinityx/product/etc/sysconfig" \
+            "$W/tree/crdroid/product/etc/sysconfig"
+
+          merge_missing_tree \
+            "$W/tree/infinityx/product/etc/permissions" \
+            "$W/tree/crdroid/product/etc/permissions"
+
+          merge_missing_tree \
+            "$W/tree/infinityx/system_ext/etc/sysconfig" \
+            "$W/tree/crdroid/system_ext/etc/sysconfig"
+
+          merge_missing_tree \
+            "$W/tree/infinityx/system_ext/etc/permissions" \
+            "$W/tree/crdroid/system_ext/etc/permissions"
+
+          # Remove stale compiled artifacts. Android will regenerate them.
+          find "$W/tree/crdroid" -type d \
+            \( -name oat -o -name dalvik-cache \) \
+            -prune -exec rm -rf {} + || true
+
+      - name: "Collect everything into one zip"
+        env:
+          OUTPUT_NAME: ${{ inputs.output_name }}
+        run: |
+          set -euo pipefail
+
+          W="$GITHUB_WORKSPACE/workspace"
+          STAGE="$W/final"
+          OUT="$GITHUB_WORKSPACE/out"
+          rm -rf "$STAGE" "$OUT"
+          mkdir -p "$STAGE" "$OUT"
+
+          # Merged crDroid tree (system, system_ext, product)
+          if [ -d "$W/tree/crdroid" ]; then
+            mkdir -p "$STAGE/merged_tree"
+            sudo rsync -a "$W/tree/crdroid/" "$STAGE/merged_tree/"
+          fi
+
+          # Merge reports and merged APKs from graft_apk.py
+          [ -f "$W/merge-report.txt" ] && cp "$W/merge-report.txt" "$STAGE/"
+          if [ -d "$W/merge" ]; then
+            mkdir -p "$STAGE/merge"
+            find "$W/merge" -maxdepth 3 -type f \
+              \( -name '*.apk' -o -name '*.txt' -o -name '*.log' \) \
+              -exec cp --parents {} "$STAGE/merge/" \; || true
+          fi
+
+          # Factory firmware bundle, if one was produced by an earlier step
+          for d in "$W/firmware" "$W/firmware_bundle" "$W/factory"; do
+            if [ -d "$d" ]; then
+              mkdir -p "$STAGE/firmware"
+              cp -a "$d"/. "$STAGE/firmware/"
+            fi
+          done
+
+          # Any raw partition images still on disk
+          if [ -d "$W/images" ]; then
+            mkdir -p "$STAGE/images"
+            cp -a "$W/images"/. "$STAGE/images/"
+          fi
+
+          sudo chown -R "$USER":"$USER" "$STAGE"
+
+          (cd "$STAGE" && zip -r -1 -q "$OUT/${OUTPUT_NAME}.zip" .)
+
+          echo "Final zip:"
+          ls -lh "$OUT"
+          unzip -l "$OUT/${OUTPUT_NAME}.zip" | tail -n 1
+
+      - name: "Upload zip"
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.output_name }}
+          path: out/${{ inputs.output_name }}.zip
+          compression-level: 0
+          retention-days: 14
+          if-no-files-found: error
