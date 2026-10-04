@@ -5,7 +5,7 @@ on:
     inputs:
 
       rom_url:
-        description: "📥 Direct HyperOS ROM URL / Google Drive link"
+        description: "📥 Direct HyperOS ROM URL"
         required: true
         type: string
 
@@ -50,7 +50,7 @@ on:
         type: boolean
 
       import_pixel_components:
-        description: "📦 Import compatible Pixel components from factory images"
+        description: "📦 Analyze Pixel factory components"
         required: true
         default: true
         type: boolean
@@ -68,16 +68,34 @@ on:
         type: boolean
 
       import_missing_apks:
-        description: "📦 Import missing compatible Pixel APKs"
+        description: "📦 Import selected compatible Pixel APKs"
         required: true
         default: true
         type: boolean
 
       import_framework_configs:
-        description: "⚙️ Import Pixel framework/config XMLs"
+        description: "⚙️ Import compatible Pixel framework/config XMLs"
         required: true
         default: true
         type: boolean
+
+      enable_boot_rescue:
+        description: "🛟 Add persistent boot-error rescue engine"
+        required: true
+        default: true
+        type: boolean
+
+      boot_rescue_timeout:
+        description: "⏱ Boot timeout before rescue"
+        required: true
+        default: "180"
+        type: string
+
+      boot_rescue_max_reboots:
+        description: "🔁 Maximum automatic rescue reboots"
+        required: true
+        default: "5"
+        type: string
 
 
 jobs:
@@ -101,9 +119,9 @@ jobs:
       # PIXEL 7 / PANTHER
       # ==========================================================
 
-      TARGET_BRAND: "Android"
+      TARGET_BRAND: "google"
       TARGET_MANUFACTURER: "Google"
-      TARGET_MODEL: "Panther"
+      TARGET_MODEL: "Pixel 7"
       TARGET_DEVICE: "panther"
       TARGET_PRODUCT: "panther"
       TARGET_BOARD: "gs201"
@@ -133,14 +151,14 @@ jobs:
       # ==========================================================
 
       - name: "🧹 Maximize Runner Disk Space"
+        shell: bash
         run: |
-
           set -Eeuo pipefail
 
           chmod +x scripts/clean_disk.sh 2>/dev/null || true
 
           if [ -x scripts/clean_disk.sh ]; then
-              bash scripts/clean_disk.sh || true
+            bash scripts/clean_disk.sh || true
           fi
 
           echo
@@ -153,15 +171,9 @@ jobs:
       # ==========================================================
 
       - name: "⚙️ Setup Build Dependencies"
+        shell: bash
         run: |
-
           set -Eeuo pipefail
-
-          chmod +x scripts/*.sh 2>/dev/null || true
-
-          if [ -x scripts/setup_deps.sh ]; then
-              bash scripts/setup_deps.sh || true
-          fi
 
           sudo apt-get update
 
@@ -193,7 +205,9 @@ jobs:
             coreutils \
             grep \
             sed \
-            awk
+            gawk \
+            curl \
+            ca-certificates
 
           echo
           echo "============================================================"
@@ -208,25 +222,25 @@ jobs:
 
 
       # ==========================================================
-      # PORT HYPEROS
+      # PORT ORIGINAL ROM
       # ==========================================================
 
       - name: "🚀 Execute HyperOS GSI Port Engine"
         env:
-
-          SKIP_SETUP_DEPS: "1"
-
           INPUT_ROM_URL: ${{ inputs.rom_url }}
           INPUT_OUTPUT_NAME: ${{ inputs.output_name }}
           INPUT_ROM_TYPE: ${{ inputs.rom_type }}
           INPUT_FS_TYPE: ${{ inputs.fs_type }}
-          INPUT_TARGET_MODEL: ${{ inputs.target_model }}
-
+        shell: bash
         run: |
-
           set -Eeuo pipefail
 
-          chmod +x scripts/*.sh
+          chmod +x scripts/*.sh 2>/dev/null || true
+
+          if [ ! -x scripts/port_rom.sh ]; then
+            echo "ERROR: scripts/port_rom.sh not found."
+            exit 1
+          fi
 
           bash scripts/port_rom.sh \
             "$INPUT_ROM_URL" \
@@ -236,16 +250,42 @@ jobs:
 
 
       # ==========================================================
-      # DOWNLOAD EXACT PIXEL FACTORY IMAGE
+      # VERIFY ROM ROOT
+      # ==========================================================
+
+      - name: "🔎 Locate Generated GSI Root"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          ROOT="workspace/system_root"
+
+          if [ ! -d "$ROOT" ]; then
+            echo "ERROR: $ROOT does not exist."
+            echo
+            echo "Workspace contents:"
+            find workspace -maxdepth 3 -print 2>/dev/null | head -500 || true
+            exit 1
+          fi
+
+          echo "GSI root:"
+          echo "$ROOT"
+
+          echo
+          echo "Top-level contents:"
+          find "$ROOT" -maxdepth 2 -mindepth 1 -print | sort | head -300
+
+
+      # ==========================================================
+      # DOWNLOAD PIXEL FACTORY
       # ==========================================================
 
       - name: "🏭 Download Pixel 7 Panther Factory Package"
         if: ${{ inputs.import_pixel_components }}
         env:
           FACTORY_URL: ${{ inputs.factory_url }}
-
+        shell: bash
         run: |
-
           set -Eeuo pipefail
 
           mkdir -p \
@@ -257,10 +297,9 @@ jobs:
 
           echo
           echo "============================================================"
-          echo " Google Pixel 7 Panther Factory Image"
+          echo "Google Pixel 7 Panther Factory Image"
           echo "============================================================"
 
-          echo "URL:"
           echo "$FACTORY_URL"
 
           curl \
@@ -272,50 +311,30 @@ jobs:
             -o workspace/stock_pixel/factory/panther-factory.zip \
             "$FACTORY_URL"
 
-          echo
-          echo "Downloaded:"
-          ls -lh \
-            workspace/stock_pixel/factory/panther-factory.zip
-
-          file \
-            workspace/stock_pixel/factory/panther-factory.zip
+          file workspace/stock_pixel/factory/panther-factory.zip
 
           sha256sum \
             workspace/stock_pixel/factory/panther-factory.zip \
-            | tee \
-              workspace/stock_pixel/reports/factory.sha256
+            | tee workspace/stock_pixel/reports/factory.sha256
 
 
       # ==========================================================
-      # EXTRACT FACTORY ARCHIVE
+      # EXTRACT FACTORY
       # ==========================================================
 
       - name: "📦 Extract Pixel Factory Package"
         if: ${{ inputs.import_pixel_components }}
+        shell: bash
         run: |
-
           set -Eeuo pipefail
 
           FACTORY="workspace/stock_pixel/factory/panther-factory.zip"
-
           EXTRACT="workspace/stock_pixel/factory/extracted"
 
+          rm -rf "$EXTRACT"
           mkdir -p "$EXTRACT"
 
-          unzip -o \
-            "$FACTORY" \
-            -d "$EXTRACT"
-
-
-          echo
-          echo "Factory archive:"
-          find "$EXTRACT" \
-            -maxdepth 5 \
-            -type f \
-            -printf '%p\n' \
-            | sort \
-            | head -500
-
+          unzip -o "$FACTORY" -d "$EXTRACT"
 
           IMAGE_ZIP="$(
             find "$EXTRACT" \
@@ -326,9 +345,7 @@ jobs:
               || true
           )"
 
-
           if [ -z "$IMAGE_ZIP" ]; then
-
             IMAGE_ZIP="$(
               find "$EXTRACT" \
                 -type f \
@@ -336,58 +353,50 @@ jobs:
                 -print \
                 | head -n 1 \
                 || true
-            )
-
+            )"
           fi
 
-
           if [ -z "$IMAGE_ZIP" ]; then
-
-            echo
             echo "ERROR: Pixel image archive was not found."
 
             find "$EXTRACT" \
               -type f \
-              -printf '%p\n'
+              -print
 
             exit 1
-
           fi
 
-
-          echo
-          echo "Using image archive:"
+          echo "Using:"
           echo "$IMAGE_ZIP"
 
-
-          mkdir -p \
-            workspace/stock_pixel/images/nested
+          rm -rf workspace/stock_pixel/images/nested
+          mkdir -p workspace/stock_pixel/images/nested
 
           unzip -o \
             "$IMAGE_ZIP" \
             -d workspace/stock_pixel/images/nested
 
-
           echo
-          echo "Nested image archive:"
+          echo "Nested image contents:"
           find workspace/stock_pixel/images/nested \
             -type f \
-            -printf '%p\n' \
+            -print \
             | sort
 
 
       # ==========================================================
-      # LOCATE ALL PIXEL PARTITIONS
+      # LOCATE PIXEL PARTITIONS
       # ==========================================================
 
-      - name: "🔎 Locate Pixel System / Product / System_Ext / Vendor"
+      - name: "🔎 Locate Pixel Partitions"
         if: ${{ inputs.import_pixel_components }}
+        shell: bash
         run: |
-
           set -Eeuo pipefail
 
           FOUND_DIR="workspace/stock_pixel/images/found"
 
+          rm -rf "$FOUND_DIR"
           mkdir -p "$FOUND_DIR"
 
           for PART in \
@@ -410,29 +419,19 @@ jobs:
             )"
 
             if [ -n "$FOUND" ]; then
-
-              echo
-              echo "FOUND:"
-              echo "$PART"
+              echo "FOUND $PART:"
               echo "$FOUND"
 
               cp \
                 "$FOUND" \
                 "$FOUND_DIR/${PART}.img"
-
             else
-
-              echo
-              echo "NOT FOUND:"
-              echo "$PART"
-
+              echo "NOT FOUND: $PART"
             fi
 
           done
 
-
           echo
-          echo "Partition images:"
           ls -lh "$FOUND_DIR" || true
 
 
@@ -442,40 +441,37 @@ jobs:
 
       - name: "🧩 Extract Pixel Partition Filesystems"
         if: ${{ inputs.import_pixel_components }}
+        shell: bash
         run: |
-
           set -Eeuo pipefail
 
           BASE="workspace/stock_pixel/partitions"
 
+          rm -rf "$BASE"
           mkdir -p "$BASE"
-
 
           cleanup()
           {
-              set +e
+            set +e
 
-              for PART in \
-                system \
-                product \
-                system_ext \
-                vendor \
-                vendor_dlkm \
-                odm \
-                odm_dlkm
-              do
+            for PART in \
+              system \
+              product \
+              system_ext \
+              vendor \
+              vendor_dlkm \
+              odm \
+              odm_dlkm
+            do
+              MNT="$BASE/$PART.mnt"
 
-                  MNT="$BASE/$PART"
-
-                  if mountpoint -q "$MNT"; then
-                      sudo umount "$MNT"
-                  fi
-
-              done
+              if mountpoint -q "$MNT"; then
+                sudo umount "$MNT" || true
+              fi
+            done
           }
 
           trap cleanup EXIT
-
 
           for PART in \
             system \
@@ -494,7 +490,6 @@ jobs:
 
             mkdir -p "$DEST"
 
-
             echo
             echo "============================================================"
             echo "PIXEL PARTITION: $PART"
@@ -502,26 +497,19 @@ jobs:
 
             file "$IMG"
 
-
             RAW="$BASE/${PART}.raw.img"
 
+            rm -f "$RAW"
 
             if file "$IMG" | grep -qi "Android sparse"; then
+              echo "Converting sparse image..."
 
-                echo "Converting sparse image..."
-
-                simg2img \
-                  "$IMG" \
-                  "$RAW"
-
+              simg2img \
+                "$IMG" \
+                "$RAW"
             else
-
-                cp \
-                  "$IMG" \
-                  "$RAW"
-
+              cp "$IMG" "$RAW"
             fi
-
 
             FSTYPE="$(
               sudo blkid \
@@ -532,43 +520,28 @@ jobs:
                 || true
             )"
 
-
             if [ -z "$FSTYPE" ]; then
-
-                if file "$RAW" | grep -qi "EROFS"; then
-                    FSTYPE="erofs"
-                elif file "$RAW" | grep -qi "ext4"; then
-                    FSTYPE="ext4"
-                fi
-
+              if file "$RAW" | grep -qi "EROFS"; then
+                FSTYPE="erofs"
+              elif file "$RAW" | grep -qi "ext4"; then
+                FSTYPE="ext4"
+              fi
             fi
 
+            echo "Filesystem: ${FSTYPE:-unknown}"
 
-            echo "Filesystem:"
-            echo "${FSTYPE:-unknown}"
+            case "$FSTYPE" in
 
-
-            if [ "$FSTYPE" = "erofs" ]; then
-
+              erofs)
                 echo "Extracting EROFS..."
 
-                if command -v fsck.erofs >/dev/null 2>&1; then
+                fsck.erofs \
+                  --extract="$DEST" \
+                  "$RAW"
+                ;;
 
-                    fsck.erofs \
-                      --extract="$DEST" \
-                      "$RAW"
-
-                else
-
-                    echo "ERROR: fsck.erofs unavailable."
-                    exit 1
-
-                fi
-
-
-            elif [ "$FSTYPE" = "ext4" ]; then
-
-                MNT="$BASE/${PART}.mnt"
+              ext4)
+                MNT="$BASE/$PART.mnt"
 
                 mkdir -p "$MNT"
 
@@ -578,33 +551,28 @@ jobs:
                   "$RAW" \
                   "$MNT"
 
-
                 sudo rsync \
                   -aHAX \
                   "$MNT"/ \
                   "$DEST"/
 
-
                 sudo umount "$MNT"
-
                 rmdir "$MNT"
+                ;;
 
+              *)
+                echo "ERROR: Unsupported filesystem."
 
-            else
-
-                echo "ERROR: Unsupported filesystem:"
                 file "$RAW"
 
                 exit 1
-
-            fi
-
+                ;;
+            esac
 
             rm -f "$RAW"
 
-
             echo
-            echo "$PART extracted files:"
+            echo "$PART extracted file count:"
             find "$DEST" \
               -type f \
               | wc -l
@@ -613,27 +581,22 @@ jobs:
 
 
       # ==========================================================
-      # CREATE COMPLETE PIXEL FILE INDEX
+      # PIXEL FILE INDEX
       # ==========================================================
 
-      - name: "📚 Build Complete Pixel Component Index"
+      - name: "📚 Build Pixel Component Index"
         if: ${{ inputs.import_pixel_components }}
+        shell: bash
         run: |
-
           set -Eeuo pipefail
 
           INDEX="workspace/stock_pixel/index/files.tsv"
 
-          mkdir -p \
-            workspace/stock_pixel/index
+          mkdir -p workspace/stock_pixel/index
 
-          : > "$INDEX"
-
-
-          echo -e \
-            "partition\tpath\tsize\tsha256\tfiletype" \
+          printf '%s\n' \
+            $'partition\tpath\tsize\tsha256\tfiletype' \
             > "$INDEX"
-
 
           for PART in \
             system \
@@ -649,36 +612,33 @@ jobs:
 
             [ -d "$ROOT" ] || continue
 
-
             while IFS= read -r FILE; do
 
-                REL="${FILE#$ROOT/}"
+              REL="${FILE#$ROOT/}"
 
-                SIZE="$(
-                  stat \
-                    -c '%s' \
-                    "$FILE"
-                )"
+              SIZE="$(
+                stat -c '%s' "$FILE"
+              )"
 
-                HASH="$(
-                  sha256sum "$FILE" |
-                  awk '{print $1}'
-                )"
+              HASH="$(
+                sha256sum "$FILE" |
+                awk '{print $1}'
+              )"
 
-                TYPE="$(
-                  file -b "$FILE" |
-                  tr '\t' ' ' |
-                  head -c 200
-                )"
+              TYPE="$(
+                file -b "$FILE" |
+                tr '\t' ' ' |
+                head -c 200
+              )"
 
-                printf \
-                  '%s\t%s\t%s\t%s\t%s\n' \
-                  "$PART" \
-                  "$REL" \
-                  "$SIZE" \
-                  "$HASH" \
-                  "$TYPE" \
-                  >> "$INDEX"
+              printf \
+                '%s\t%s\t%s\t%s\t%s\n' \
+                "$PART" \
+                "$REL" \
+                "$SIZE" \
+                "$HASH" \
+                "$TYPE" \
+                >> "$INDEX"
 
             done < <(
               find "$ROOT" \
@@ -688,40 +648,30 @@ jobs:
 
           done
 
-
           echo
-          echo "Indexed files:"
+          echo "Indexed:"
           tail -n +2 "$INDEX" | wc -l
-
-          echo
-          echo "Index size:"
-          du -h "$INDEX"
 
 
       # ==========================================================
-      # BUILD PATH INDEX
+      # PIXEL PATH INDEX
       # ==========================================================
 
       - name: "🗂️ Build Pixel Path Lookup Database"
         if: ${{ inputs.import_pixel_components }}
+        shell: bash
         run: |
-
           set -Eeuo pipefail
 
           INDEX="workspace/stock_pixel/index/files.tsv"
-
           PATHS="workspace/stock_pixel/index/path-index.txt"
-
           BASENAMES="workspace/stock_pixel/index/basename-index.txt"
 
-          cut \
-            -f2 \
-            "$INDEX" \
-            | tail -n +2 \
-            | sort \
-            | uniq \
+          tail -n +2 "$INDEX" |
+            cut -f2 |
+            sort |
+            uniq \
             > "$PATHS"
-
 
           awk -F '\t' '
             NR > 1 {
@@ -729,15 +679,14 @@ jobs:
               sub(/^.*\//, "", n)
               print n "\t" $1 "\t" $2
             }
-          ' "$INDEX" \
-            | sort \
+          ' "$INDEX" |
+            sort \
             > "$BASENAMES"
 
-
-          echo "Path index:"
+          echo "Paths:"
           wc -l "$PATHS"
 
-          echo "Basename index:"
+          echo "Basenames:"
           wc -l "$BASENAMES"
 
 
@@ -747,14 +696,13 @@ jobs:
 
       - name: "📋 Extract Pixel Build Properties"
         if: ${{ inputs.import_pixel_components }}
+        shell: bash
         run: |
-
           set -Eeuo pipefail
 
           REPORT="workspace/stock_pixel/reports/stock-build-props.txt"
 
           : > "$REPORT"
-
 
           for PART in \
             system \
@@ -768,33 +716,26 @@ jobs:
 
             [ -d "$ROOT" ] || continue
 
+            while IFS= read -r PROP; do
 
-            find "$ROOT" \
-              -type f \
-              -name build.prop \
-              -print \
-              | while IFS= read -r PROP; do
+              printf '%s\n' \
+                "============================================================" \
+                "$PART: $PROP" \
+                "============================================================" \
+                >> "$REPORT"
 
-                  echo \
-                    "============================================================" \
-                    >> "$REPORT"
+              cat "$PROP" >> "$REPORT"
 
-                  echo \
-                    "$PART: $PROP" \
-                    >> "$REPORT"
+              printf '\n' >> "$REPORT"
 
-                  echo \
-                    "============================================================" \
-                    >> "$REPORT"
-
-                  cat "$PROP" >> "$REPORT"
-
-                  echo >> "$REPORT"
-
-              done
+            done < <(
+              find "$ROOT" \
+                -type f \
+                -name build.prop \
+                -print
+            )
 
           done
-
 
           grep -E \
             '^(ro\.vndk|ro\.build\.version\.sdk|ro\.build\.version\.release|ro\.product\.first_api_level|ro\.vendor\.)=' \
@@ -804,1503 +745,42 @@ jobs:
 
 
       # ==========================================================
-      # CREATE COMPATIBILITY ENGINE
+      # CREATE PATCH ENGINE WITHOUT HEREDOCS
       # ==========================================================
 
       - name: "🧬 Create Panther Compatibility Engine"
+        shell: bash
         run: |
-
           set -Eeuo pipefail
 
           mkdir -p scripts
 
+          python3 -c '
+          from pathlib import Path
 
-          cat > scripts/patch_hyperos_panther.sh <<'PATCH'
-#!/usr/bin/env bash
-
-set -Eeuo pipefail
-
-ROOT="${1:-workspace/system_root}"
-STOCK="${2:-workspace/stock_pixel/partitions}"
-
-IMPORT_CONFIGS="${IMPORT_CONFIGS:-1}"
-IMPORT_APKS="${IMPORT_APKS:-1}"
-VENDOR_REFERENCE="${VENDOR_REFERENCE:-1}"
-
-echo
-echo "============================================================"
-echo " HyperOS → Pixel 7 Panther Compatibility Engine"
-echo "============================================================"
-
-
-if [ ! -d "$ROOT" ]; then
-    echo "ERROR: GSI system root does not exist."
-    exit 1
-fi
-
-
-# ==============================================================
-# SYSTEM ROOT DETECTION
-# ==============================================================
-
-if [ -d "$ROOT/system/system" ]; then
-    SYS="$ROOT/system/system"
-elif [ -d "$ROOT/system" ]; then
-    SYS="$ROOT/system"
-else
-    SYS="$ROOT"
-fi
-
-
-echo "GSI:"
-echo "$SYS"
-
-echo "Pixel reference:"
-echo "$STOCK"
-
-
-# ==============================================================
-# DIRECTORY SETUP
-# ==============================================================
-
-mkdir -p \
-    "$SYS/bin" \
-    "$SYS/etc/init" \
-    "$SYS/etc/permissions" \
-    "$SYS/etc/sysconfig" \
-    "$SYS/etc/vintf" \
-    "$SYS/etc/panther-stock" \
-    "$SYS/etc/panther-stock/vendor" \
-    "$SYS/etc/panther-stock/odm"
-
-
-REPORT="$ROOT/panther-stock-import-report.txt"
-
-: > "$REPORT"
-
-
-# ==============================================================
-# BUILD.PROP HELPERS
-# ==============================================================
-
-PROP="$SYS/build.prop"
-
-touch "$PROP"
-
-cp \
-    "$PROP" \
-    "$PROP.hyperos-original"
-
-
-remove_prop()
-{
-    KEY="$1"
-
-    sed -i \
-        "/^${KEY}=/d" \
-        "$PROP" \
-        2>/dev/null \
-        || true
-}
-
-
-set_prop()
-{
-    KEY="$1"
-    VALUE="$2"
-
-    remove_prop "$KEY"
-
-    printf '%s=%s\n' \
-        "$KEY" \
-        "$VALUE" \
-        >> "$PROP"
-}
-
-
-# ==============================================================
-# REMOVE CONFLICTING TARGET PROPERTIES
-# ==============================================================
-
-for KEY in \
-    ro.product.brand \
-    ro.product.manufacturer \
-    ro.product.model \
-    ro.product.device \
-    ro.product.name \
-    ro.product.board \
-    ro.product.system.brand \
-    ro.product.system.manufacturer \
-    ro.product.system.model \
-    ro.product.system.device \
-    ro.product.system.name \
-    ro.product.product.brand \
-    ro.product.product.manufacturer \
-    ro.product.product.model \
-    ro.product.product.device \
-    ro.product.product.name \
-    ro.build.product \
-    ro.board.platform \
-    ro.build.fingerprint \
-    ro.system.build.fingerprint
-do
-
-    remove_prop "$KEY"
-
-done
-
-
-# ==============================================================
-# PIXEL IDENTITY
-# ==============================================================
-
-set_prop ro.product.brand Android
-set_prop ro.product.manufacturer Google
-set_prop ro.product.model Panther
-set_prop ro.product.device panther
-set_prop ro.product.name panther
-set_prop ro.product.board gs201
-
-set_prop ro.board.platform gs201
-
-set_prop ro.product.system.brand Android
-set_prop ro.product.system.manufacturer Google
-set_prop ro.product.system.model Panther
-set_prop ro.product.system.device panther
-set_prop ro.product.system.name panther
-
-set_prop ro.product.product.brand Android
-set_prop ro.product.product.manufacturer Google
-set_prop ro.product.product.model Panther
-set_prop ro.product.product.device panther
-set_prop ro.product.product.name panther
-
-set_prop ro.build.product panther
-
-
-# ==============================================================
-# ANDROID 16
-# ==============================================================
-
-set_prop ro.build.id BP2A.250605.031.A2
-set_prop ro.build.display.id BP2A.250605.031.A2
-set_prop ro.build.version.incremental 13578606
-
-set_prop ro.build.version.release 16
-set_prop ro.build.version.release_or_codename 16
-set_prop ro.build.version.release_or_preview_display 16
-
-set_prop ro.build.version.sdk 36
-set_prop ro.build.version.sdk_full 36.0
-
-set_prop ro.build.version.codename REL
-set_prop ro.build.version.preview_sdk 0
-set_prop ro.build.version.preview_sdk_fingerprint REL
-
-set_prop ro.build.version.security_patch 2025-06-05
-
-set_prop ro.build.type user
-set_prop ro.build.tags release-keys
-set_prop ro.build.flavor panther-user
-
-
-# ==============================================================
-# FINGERPRINT
-# ==============================================================
-
-set_prop \
-    ro.build.fingerprint \
-    google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys
-
-set_prop \
-    ro.system.build.fingerprint \
-    google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys
-
-set_prop \
-    ro.system.build.id \
-    BP2A.250605.031.A2
-
-set_prop \
-    ro.system.build.version.release \
-    16
-
-set_prop \
-    ro.system.build.version.sdk \
-    36
-
-set_prop \
-    ro.system.build.version.security_patch \
-    2025-06-05
-
-
-# ==============================================================
-# CPU
-# ==============================================================
-
-set_prop ro.product.cpu.abi arm64-v8a
-set_prop ro.product.cpu.abilist arm64-v8a,armeabi-v7a,armeabi
-set_prop ro.product.cpu.abilist32 armeabi-v7a,armeabi
-set_prop ro.product.cpu.abilist64 arm64-v8a
-
-
-# ==============================================================
-# TREBLE
-# ==============================================================
-
-set_prop ro.treble.enabled true
-set_prop ro.llndk.api_level 202504
-set_prop ro.postinstall.fstab.prefix /system
-set_prop ro.actionable_compatible_property.enabled true
-
-
-# ==============================================================
-# SECURITY
-# ==============================================================
-
-set_prop ro.secure 1
-set_prop ro.adb.secure 1
-set_prop ro.debuggable 0
-set_prop ro.force.debuggable 0
-set_prop security.perf_harden 1
-
-
-# ==============================================================
-# GS201
-# ==============================================================
-
-set_prop ro.hardware gs201
-set_prop ro.boot.hardware gs201
-set_prop ro.boot.hardware.platform gs201
-set_prop ro.hardware.keystore trusty
-set_prop ro.hardware.camera gs201
-
-
-# ==============================================================
-# GRAPHICS
-# ==============================================================
-
-set_prop ro.hardware.vulkan pixel
-
-set_prop debug.sf.enable_hwc_vds 1
-set_prop debug.sf.latch_unsignaled 1
-set_prop debug.sf.disable_backpressure 1
-set_prop debug.sf.use_phase_offsets_as_durations 1
-
-set_prop ro.surface_flinger.max_frame_buffer_acquired_buffers 3
-set_prop ro.surface_flinger.primary_display_orientation 0
-set_prop ro.surface_flinger.game_default_frame_rate_override 60
-
-
-# ==============================================================
-# ART
-# ==============================================================
-
-set_prop dalvik.vm.useartservice true
-set_prop dalvik.vm.usejit true
-
-set_prop dalvik.vm.dex2oat-Xms 64m
-set_prop dalvik.vm.dex2oat-Xmx 512m
-
-set_prop dalvik.vm.image-dex2oat-Xms 64m
-set_prop dalvik.vm.image-dex2oat-Xmx 64m
-
-set_prop pm.dexopt.first-boot verify
-set_prop pm.dexopt.boot-after-ota verify
-set_prop pm.dexopt.install speed-profile
-set_prop pm.dexopt.bg-dexopt speed-profile
-
-
-# ==============================================================
-# TELEPHONY
-# ==============================================================
-
-set_prop ro.telephony.default_network 26
-set_prop persist.radio.multisim.config dsds
-set_prop persist.radio.multisim.stackid 0
-set_prop persist.radio.multisim.stackid0 0
-set_prop persist.radio.multisim.stackid1 1
-
-
-# ==============================================================
-# EUICC
-# ==============================================================
-
-set_prop ro.telephony.euicc true
-set_prop persist.radio.euicc.enabled true
-set_prop persist.radio.euicc 1
-set_prop ro.vendor.euicc true
-
-
-# ==============================================================
-# KEYGUARD
-# ==============================================================
-
-set_prop ro.keyguard.supported true
-set_prop config.disableLockscreen false
-
-
-# ==============================================================
-# GOOGLE
-# ==============================================================
-
-set_prop ro.com.google.clientidbase android-google
-set_prop ro.setupwizard.mode OPTIONAL
-set_prop net.bt.name Android
-set_prop ro.allow.mock.location 0
-
-
-# ==============================================================
-# FILE IMPORT
-# ==============================================================
-
-import_file()
-{
-    PART="$1"
-    REL="$2"
-    MODE="$3"
-
-    SRC="$STOCK/$PART/$REL"
-    DEST="$SYS/$REL"
-
-    [ -f "$SRC" ] || return 1
-
-    mkdir -p "$(dirname "$DEST")"
-
-
-    if [ "$MODE" = "replace" ]; then
-
-        if [ -f "$DEST" ]; then
-            cp "$DEST" "$DEST.hyperos-backup"
-        fi
-
-        cp -a "$SRC" "$DEST"
-
-        echo "REPLACED $PART/$REL" >> "$REPORT"
-
-    else
-
-        if [ ! -e "$DEST" ]; then
-
-            cp -a "$SRC" "$DEST"
-
-            echo "ADDED $PART/$REL" >> "$REPORT"
-
-        else
-
-            echo "KEPT $REL" >> "$REPORT"
-
-        fi
-
-    fi
-}
-
-
-# ==============================================================
-# SAFE CONFIGURATION IMPORT
-# ==============================================================
-
-if [ "$IMPORT_CONFIGS" = "1" ]; then
-
-    echo >> "$REPORT"
-    echo "PIXEL FRAMEWORK CONFIGURATION" >> "$REPORT"
-    echo "=============================" >> "$REPORT"
-
-
-    for PART in \
-        system \
-        product \
-        system_ext
-    do
-
-        SRC="$STOCK/$PART"
-
-        [ -d "$SRC/etc" ] || continue
-
-
-        # --------------------------------------------------------
-        # EUICC
-        # --------------------------------------------------------
-
-        find "$SRC/etc" \
-            -type f \
-            \( \
-                -iname '*euicc*' \
-                -o -iname '*uicc*' \
-                -o -iname '*embedded*subscription*' \
-            \) \
-            -print \
-            | while IFS= read -r FILE; do
-
-                REL="${FILE#$SRC/}"
-
-                import_file \
-                    "$PART" \
-                    "$REL" \
-                    add
-
-            done
-
-
-        # --------------------------------------------------------
-        # BIOMETRICS
-        # --------------------------------------------------------
-
-        find "$SRC/etc" \
-            -type f \
-            \( \
-                -iname '*fingerprint*' \
-                -o -iname '*biometric*' \
-            \) \
-            -print \
-            | while IFS= read -r FILE; do
-
-                REL="${FILE#$SRC/}"
-
-                import_file \
-                    "$PART" \
-                    "$REL" \
-                    add
-
-            done
-
-
-        # --------------------------------------------------------
-        # TELEPHONY
-        # --------------------------------------------------------
-
-        find "$SRC/etc" \
-            -type f \
-            \( \
-                -iname '*carrier*' \
-                -o -iname '*telephony*' \
-                -o -iname '*subscription*' \
-            \) \
-            -print \
-            | while IFS= read -r FILE; do
-
-                REL="${FILE#$SRC/}"
-
-                import_file \
-                    "$PART" \
-                    "$REL" \
-                    add
-
-            done
-
-
-        # --------------------------------------------------------
-        # IMPORTANT HARDWARE PERMISSIONS
-        # --------------------------------------------------------
-
-        if [ -d "$SRC/etc/permissions" ]; then
-
-            find "$SRC/etc/permissions" \
-                -type f \
-                -name '*.xml' \
-                -print \
-                | while IFS= read -r FILE; do
-
-                    BASE="$(basename "$FILE")"
-
-                    case "$BASE" in
-
-                        *fingerprint*)
-                            REL="${FILE#$SRC/}"
-                            import_file "$PART" "$REL" add
-                            ;;
-
-                        *biometric*)
-                            REL="${FILE#$SRC/}"
-                            import_file "$PART" "$REL" add
-                            ;;
-
-                        *euicc*)
-                            REL="${FILE#$SRC/}"
-                            import_file "$PART" "$REL" add
-                            ;;
-
-                        *telephony*)
-                            REL="${FILE#$SRC/}"
-                            import_file "$PART" "$REL" add
-                            ;;
-
-                        *wifi*)
-                            REL="${FILE#$SRC/}"
-                            import_file "$PART" "$REL" add
-                            ;;
-
-                        *nfc*)
-                            REL="${FILE#$SRC/}"
-                            import_file "$PART" "$REL" add
-                            ;;
-
-                    esac
-
-                done
-
-        fi
-
-    done
-
-fi
-
-
-# ==============================================================
-# IMPORT MISSING PIXEL APKs
-# ==============================================================
-
-if [ "$IMPORT_APKS" = "1" ]; then
-
-    echo >> "$REPORT"
-    echo "PIXEL APK CANDIDATES" >> "$REPORT"
-    echo "====================" >> "$REPORT"
-
-
-    for PART in \
-        system \
-        product \
-        system_ext
-    do
-
-        SRC="$STOCK/$PART"
-
-        [ -d "$SRC" ] || continue
-
-
-        find "$SRC" \
-            -type f \
-            -name '*.apk' \
-            -print \
-            | while IFS= read -r APK; do
-
-                BASE="$(basename "$APK")"
-
-                case "$BASE" in
-
-                    *Euicc*|*EUICC*|*euicc*)
-
-                        REL="${APK#$SRC/}"
-
-                        DEST="$SYS/$REL"
-
-                        if [ ! -f "$DEST" ]; then
-
-                            mkdir -p "$(dirname "$DEST")"
-
-                            cp -a "$APK" "$DEST"
-
-                            echo \
-                                "ADDED APK $PART/$REL" \
-                                >> "$REPORT"
-
-                        else
-
-                            echo \
-                                "KEPT APK $REL" \
-                                >> "$REPORT"
-
-                        fi
-
-                        ;;
-
-                esac
-
-            done
-
-    done
-
-fi
-
-
-# ==============================================================
-# HARDWARE FEATURE XML
-# ==============================================================
-
-cat > "$SYS/etc/permissions/panther-hardware.xml" <<'EOF'
-<?xml version="1.0" encoding="utf-8"?>
-<permissions>
-    <feature name="android.hardware.wifi" />
-    <feature name="android.hardware.wifi.direct" />
-
-    <feature name="android.hardware.bluetooth" />
-
-    <feature name="android.hardware.camera" />
-    <feature name="android.hardware.camera.front" />
-
-    <feature name="android.hardware.fingerprint" />
-
-    <feature name="android.hardware.nfc" />
-
-    <feature name="android.hardware.location" />
-    <feature name="android.hardware.location.gps" />
-
-    <feature name="android.hardware.telephony" />
-    <feature name="android.hardware.telephony.subscription" />
-    <feature name="android.hardware.telephony.euicc" />
-
-    <feature name="android.hardware.usb.host" />
-</permissions>
-EOF
-
-
-cat > "$SYS/etc/permissions/panther-biometric.xml" <<'EOF'
-<?xml version="1.0" encoding="utf-8"?>
-<permissions>
-    <feature name="android.hardware.fingerprint" />
-</permissions>
-EOF
-
-
-cat > "$SYS/etc/permissions/panther-euicc.xml" <<'EOF'
-<?xml version="1.0" encoding="utf-8"?>
-<permissions>
-    <feature name="android.hardware.telephony.euicc" />
-</permissions>
-EOF
-
-
-# ==============================================================
-# SYSCONFIG
-# ==============================================================
-
-cat > "$SYS/etc/sysconfig/panther-keyguard.xml" <<'EOF'
-<?xml version="1.0" encoding="utf-8"?>
-<config>
-    <allow-in-data-usage-save package="com.android.systemui" />
-    <allow-in-power-save package="com.android.systemui" />
-</config>
-EOF
-
-
-# ==============================================================
-# STAGE VENDOR / ODM REFERENCE
-# ==============================================================
-
-if [ "$VENDOR_REFERENCE" = "1" ]; then
-
-    echo >> "$REPORT"
-    echo "PIXEL VENDOR / ODM REFERENCE" >> "$REPORT"
-    echo "============================" >> "$REPORT"
-
-
-    for PART in \
-        vendor \
-        odm
-    do
-
-        SRC="$STOCK/$PART"
-
-        [ -d "$SRC" ] || continue
-
-
-        DEST="$SYS/etc/panther-stock/$PART"
-
-        mkdir -p "$DEST"
-
-
-        # --------------------------------------------------------
-        # VINTF
-        # --------------------------------------------------------
-
-        if [ -d "$SRC/etc/vintf" ]; then
-
-            mkdir -p "$DEST/etc/vintf"
-
-            cp -a \
-                "$SRC/etc/vintf"/. \
-                "$DEST/etc/vintf"/ \
-                2>/dev/null \
-                || true
-
-        fi
-
-
-        # --------------------------------------------------------
-        # PERMISSIONS
-        # --------------------------------------------------------
-
-        if [ -d "$SRC/etc/permissions" ]; then
-
-            mkdir -p "$DEST/etc/permissions"
-
-            find "$SRC/etc/permissions" \
-                -type f \
-                -name '*.xml' \
-                -exec cp -a {} "$DEST/etc/permissions/" \; \
-                2>/dev/null \
-                || true
-
-        fi
-
-
-        # --------------------------------------------------------
-        # INIT SERVICE DEFINITIONS
-        # --------------------------------------------------------
-
-        if [ -d "$SRC/etc/init" ]; then
-
-            mkdir -p "$DEST/etc/init"
-
-            find "$SRC/etc/init" \
-                -type f \
-                -exec cp -a {} "$DEST/etc/init/" \; \
-                2>/dev/null \
-                || true
-
-        fi
-
-
-        # --------------------------------------------------------
-        # FIRMWARE INDEX ONLY
-        # --------------------------------------------------------
-
-        if [ -d "$SRC/firmware" ]; then
-
-            find "$SRC/firmware" \
-                -type f \
-                -printf '%P\n' \
-                > "$DEST-firmware-index.txt" \
-                2>/dev/null \
-                || true
-
-        fi
-
-
-        # --------------------------------------------------------
-        # HAL INDEX
-        # --------------------------------------------------------
-
-        find "$SRC" \
-            -type f \
-            \( \
-                -iname '*wifi*' \
-                -o -iname '*bluetooth*' \
-                -o -iname '*camera*' \
-                -o -iname '*audio*' \
-                -o -iname '*sensor*' \
-                -o -iname '*fingerprint*' \
-                -o -iname '*biometric*' \
-                -o -iname '*nfc*' \
-                -o -iname '*gnss*' \
-                -o -iname '*radio*' \
-                -o -iname '*thermal*' \
-                -o -iname '*power*' \
-                -o -iname '*health*' \
-                -o -iname '*usb*' \
-                -o -iname '*gpu*' \
-            \) \
-            -printf '%P\n' \
-            >> "$DEST-hal-index.txt" \
-            2>/dev/null \
-            || true
-
-    done
-
-fi
-
-
-# ==============================================================
-# SYSTEMUI CANDIDATE REPORT
-# ==============================================================
-
-find "$ROOT" \
-    -type f \
-    \( \
-        -name SystemUI.apk \
-        -o -name SystemUI.odex \
-        -o -name SystemUI.vdex \
-    \) \
-    -print \
-    > "$ROOT/panther-systemui-candidates.txt" \
-    2>/dev/null \
-    || true
-
-
-# ==============================================================
-# RUNTIME DRIVER RESOLVER
-# ==============================================================
-
-cat > "$SYS/bin/panther-driver-resolver" <<'EOF'
-#!/system/bin/sh
-
-TAG="PantherDriverResolver"
-
-LOG="/data/local/tmp/panther-driver-resolver.log"
-
-SEARCH_ROOTS="
-/vendor
-/product
-/system_ext
-/system
-/odm
-/vendor_dlkm
-/odm_dlkm
-/apex
-"
-
-
-mkdir -p /data/local/tmp 2>/dev/null || true
-
-
-logmsg()
-{
-    MSG="$*"
-
-    echo "$MSG" >> "$LOG"
-
-    log -t "$TAG" "$MSG" 2>/dev/null || true
-}
-
-
-# ==============================================================
-# PREVENT DUPLICATE EXECUTION
-# ==============================================================
-
-if [ "$(getprop sys.panther.driver_resolver.ran)" = "1" ]; then
-    exit 0
-fi
-
-setprop sys.panther.driver_resolver.ran 1
-
-
-logmsg "================================================"
-logmsg "Pixel 7 Panther compatibility resolver"
-logmsg "================================================"
-
-
-# ==============================================================
-# WAIT FOR PARTITIONS
-# ==============================================================
-
-wait_path()
-{
-    TARGET="$1"
-    TIMEOUT="$2"
-
-    I=0
-
-    while [ "$I" -lt "$TIMEOUT" ]; do
-
-        if [ -e "$TARGET" ]; then
-            logmsg "AVAILABLE $TARGET"
-            return 0
-        fi
-
-        sleep 1
-
-        I=$((I + 1))
-
-    done
-
-    logmsg "TIMEOUT $TARGET"
-
-    return 1
-}
-
-
-wait_path /vendor 180 || true
-wait_path /product 180 || true
-wait_path /system_ext 180 || true
-wait_path /odm 180 || true
-wait_path /vendor_dlkm 180 || true
-wait_path /odm_dlkm 180 || true
-
-
-# ==============================================================
-# WAIT FOR APEX
-# ==============================================================
-
-I=0
-
-while [ "$I" -lt 180 ]; do
-
-    READY="$(getprop apex.all.ready 2>/dev/null || true)"
-
-    if [ "$READY" = "1" ] || [ "$READY" = "true" ]; then
-
-        logmsg "APEX READY"
-
-        break
-
-    fi
-
-    sleep 1
-
-    I=$((I + 1))
-
-done
-
-
-# ==============================================================
-# PARTITION STATUS
-# ==============================================================
-
-for ROOT in \
-    /system \
-    /system_ext \
-    /product \
-    /vendor \
-    /odm \
-    /vendor_dlkm \
-    /odm_dlkm \
-    /apex
-do
-
-    if [ -e "$ROOT" ]; then
-        logmsg "MOUNTED $ROOT"
-    else
-        logmsg "MISSING $ROOT"
-    fi
-
-done
-
-
-# ==============================================================
-# EXACT FILE SEARCH
-# ==============================================================
-
-find_exact()
-{
-    NAME="$1"
-
-    for ROOT in $SEARCH_ROOTS; do
-
-        [ -d "$ROOT" ] || continue
-
-        RESULT="$(
-            find "$ROOT" \
-                -type f \
-                -name "$NAME" \
-                -print \
-                2>/dev/null \
-                | head -n 1
-        )"
-
-        if [ -n "$RESULT" ]; then
-
-            logmsg "FOUND $NAME -> $RESULT"
-
-            return 0
-
-        fi
-
-    done
-
-    logmsg "NOT FOUND $NAME"
-
-    return 1
-}
-
-
-resolve()
-{
-    find_exact "$1" || true
-}
-
-
-# ==============================================================
-# WIFI
-# ==============================================================
-
-logmsg "===== WIFI ====="
-
-resolve wifi.driver.apex
-resolve com.android.wifi.apex
-resolve android.hardware.wifi-service
-resolve android.hardware.wifi@1.0-service
-resolve android.hardware.wifi@1.0-impl.so
-resolve libwifi-hal.so
-
-
-# ==============================================================
-# BLUETOOTH
-# ==============================================================
-
-logmsg "===== BLUETOOTH ====="
-
-resolve android.hardware.bluetooth-service
-resolve android.hardware.bluetooth@1.1-service
-
-
-# ==============================================================
-# CAMERA
-# ==============================================================
-
-logmsg "===== CAMERA ====="
-
-resolve android.hardware.camera.provider-service
-resolve android.hardware.camera.provider@2.7-service
-resolve android.hardware.camera.provider@2.5-service
-
-
-# ==============================================================
-# AUDIO
-# ==============================================================
-
-logmsg "===== AUDIO ====="
-
-resolve android.hardware.audio.service
-resolve android.hardware.audio@7.0-impl.so
-resolve audio.primary.gs201.so
-
-
-# ==============================================================
-# SENSORS
-# ==============================================================
-
-logmsg "===== SENSORS ====="
-
-resolve android.hardware.sensors-service
-resolve android.hardware.sensors@2.1-service
-
-
-# ==============================================================
-# FINGERPRINT
-# ==============================================================
-
-logmsg "===== FINGERPRINT ====="
-
-resolve android.hardware.biometrics.fingerprint-service
-resolve android.hardware.biometrics.fingerprint@2.1-service
-
-
-# ==============================================================
-# NFC
-# ==============================================================
-
-logmsg "===== NFC ====="
-
-resolve android.hardware.nfc-service
-resolve android.hardware.nfc@1.2-service
-
-
-# ==============================================================
-# GNSS
-# ==============================================================
-
-logmsg "===== GNSS ====="
-
-resolve android.hardware.gnss-service
-resolve android.hardware.gnss@2.1-service
-
-
-# ==============================================================
-# USB
-# ==============================================================
-
-logmsg "===== USB ====="
-
-resolve android.hardware.usb-service
-
-
-# ==============================================================
-# RADIO
-# ==============================================================
-
-logmsg "===== RADIO ====="
-
-resolve android.hardware.radio-service
-resolve android.hardware.radio@2.0-service
-resolve android.hardware.radio@1.6-service
-
-
-# ==============================================================
-# GPU
-# ==============================================================
-
-logmsg "===== GPU ====="
-
-resolve vulkan.gs201.so
-resolve libGLES_mali.so
-resolve libEGL.so
-
-
-# ==============================================================
-# EUICC
-# ==============================================================
-
-logmsg "===== EUICC ====="
-
-resolve EuiccService
-resolve com.android.euicc
-resolve com.google.android.euicc
-
-
-# ==============================================================
-# FIRMWARE LOCATIONS
-# ==============================================================
-
-logmsg "===== FIRMWARE ====="
-
-for DIR in \
-    /vendor/firmware \
-    /vendor/etc/firmware \
-    /odm/firmware \
-    /odm/etc/firmware \
-    /vendor_dlkm/lib/firmware
-do
-
-    if [ -d "$DIR" ]; then
-        logmsg "FIRMWARE ROOT $DIR"
-    fi
-
-done
-
-
-# ==============================================================
-# PROPERTIES
-# ==============================================================
-
-logmsg "===== PROPERTIES ====="
-
-logmsg "brand=$(getprop ro.product.brand)"
-logmsg "manufacturer=$(getprop ro.product.manufacturer)"
-logmsg "model=$(getprop ro.product.model)"
-logmsg "device=$(getprop ro.product.device)"
-logmsg "product=$(getprop ro.product.name)"
-logmsg "board=$(getprop ro.product.board)"
-logmsg "platform=$(getprop ro.board.platform)"
-logmsg "android=$(getprop ro.build.version.release)"
-logmsg "sdk=$(getprop ro.build.version.sdk)"
-logmsg "fingerprint=$(getprop ro.build.fingerprint)"
-
-
-setprop sys.panther.driver_resolver.ready 1
-
-logmsg "Panther resolver finished."
-
-exit 0
-EOF
-
-
-chmod 0755 \
-    "$SYS/bin/panther-driver-resolver"
-
-
-# ==============================================================
-# INIT
-# ==============================================================
-
-cat > "$SYS/etc/init/panther-driver-resolver.rc" <<'EOF'
-
-service panther-driver-resolver /system/bin/panther-driver-resolver
-    class late_start
-    user root
-    group root system shell
-    disabled
-    oneshot
-
-on property:sys.boot_completed=1
-    start panther-driver-resolver
-
-EOF
-
-
-# ==============================================================
-# DRIVER MAP
-# ==============================================================
-
-cat > "$SYS/etc/panther-driver-map.txt" <<'EOF'
-
-Pixel 7 Panther Hardware Compatibility Map
-==========================================
-
-SYSTEM ROOTS
-------------
-
-/system
-/vendor
-/product
-/system_ext
-/odm
-/vendor_dlkm
-/odm_dlkm
-/apex
-
-
-WIFI
-----
-
-wifi.driver.apex
-com.android.wifi.apex
-android.hardware.wifi-service
-android.hardware.wifi@1.0-service
-android.hardware.wifi@1.0-impl.so
-libwifi-hal.so
-
-
-BLUETOOTH
----------
-
-android.hardware.bluetooth-service
-android.hardware.bluetooth@1.1-service
-
-
-CAMERA
-------
-
-android.hardware.camera.provider-service
-android.hardware.camera.provider@2.7-service
-android.hardware.camera.provider@2.5-service
-
-
-AUDIO
------
-
-android.hardware.audio.service
-android.hardware.audio@7.0-impl.so
-audio.primary.gs201.so
-
-
-SENSORS
--------
-
-android.hardware.sensors-service
-android.hardware.sensors@2.1-service
-
-
-FINGERPRINT
------------
-
-android.hardware.biometrics.fingerprint-service
-android.hardware.biometrics.fingerprint@2.1-service
-
-
-NFC
----
-
-android.hardware.nfc-service
-android.hardware.nfc@1.2-service
-
-
-GNSS
-----
-
-android.hardware.gnss-service
-android.hardware.gnss@2.1-service
-
-
-USB
----
-
-android.hardware.usb-service
-
-
-RADIO
------
-
-android.hardware.radio-service
-android.hardware.radio@2.0-service
-android.hardware.radio@1.6-service
-
-
-GPU
----
-
-vulkan.gs201.so
-libGLES_mali.so
-libEGL.so
-
-
-EUICC
------
-
-EuiccService
-com.android.euicc
-com.google.android.euicc
-
-EOF
-
-
-# ==============================================================
-# FINAL REPORT
-# ==============================================================
-
-cat > "$ROOT/panther-gsi-patch-report.txt" <<EOF
-
-============================================================
-HyperOS → Google Pixel 7 Panther
-Compatibility Patch Report
-============================================================
-
-TARGET
-------
-
-Brand:
-Android
-
-Manufacturer:
-Google
-
-Model:
-Panther
-
-Device:
-panther
-
-Product:
-panther
-
-Board:
-gs201
-
-Android:
-16
-
-SDK:
-36
-
-Build ID:
-BP2A.250605.031.A2
-
-Incremental:
-13578606
-
-Security patch:
-2025-06-05
-
-Fingerprint:
-google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys
-
-
-FACTORY SOURCE
---------------
-
-https://dl.google.com/dl/android/aosp/panther-bp2a.250605.031.a2-factory-53161cbb.zip
-
-
-PIXEL PARTITIONS ANALYZED
--------------------------
-
-system.img
-product.img
-system_ext.img
-vendor.img
-vendor_dlkm.img
-odm.img
-odm_dlkm.img
-
-
-COMPATIBILITY
--------------
-
-Pixel identity:
-YES
-
-Android 16:
-YES
-
-GS201:
-YES
-
-Treble:
-YES
-
-ARM64:
-YES
-
-ART:
-YES
-
-SurfaceFlinger:
-YES
-
-Telephony:
-YES
-
-eUICC:
-YES
-
-Biometrics:
-YES
-
-Keyguard:
-YES
-
-Pixel framework/config:
-YES
-
-Vendor compatibility:
-YES
-
-HAL index:
-YES
-
-APEX detection:
-YES
-
-Runtime partition detection:
-YES
-
-
-IMPORTANT
----------
-
-Pixel vendor HAL binaries are deliberately not blindly copied
-into /system.
-
-The actual Pixel vendor/ODM stack remains the hardware
-implementation.
-
-The factory images are used as the Pixel compatibility reference.
-
-EOF
-
-
-echo
-echo "============================================================"
-echo "Panther compatibility engine completed"
-echo "============================================================"
-
-echo
-echo "System root:"
-echo "$SYS"
-
-echo
-echo "Imported/staged files:"
-find "$SYS/etc/panther-stock" \
-    -type f \
-    2>/dev/null \
-    | wc -l
-
-PATCH
-
-
-          chmod +x \
-            scripts/patch_hyperos_panther.sh
-
-
-      # ==========================================================
-      # APPLY PATCH ENGINE
-      # ==========================================================
-
-      - name: "🧩 Apply Maximum Pixel 7 Panther Compatibility"
-        if: ${{ inputs.enable_aggressive_patches }}
-        env:
-
-          IMPORT_CONFIGS: ${{ inputs.import_framework_configs && '1' || '0' }}
-          IMPORT_APKS: ${{ inputs.import_missing_apks && '1' || '0' }}
-          VENDOR_REFERENCE: ${{ inputs.aggressive_vendor_reference && '1' || '0' }}
-
-        run: |
+          script = r"""#!/usr/bin/env bash
 
           set -Eeuo pipefail
 
-          bash scripts/patch_hyperos_panther.sh \
-            workspace/system_root \
-            workspace/stock_pixel/partitions
+          ROOT="${1:-workspace/system_root}"
+          STOCK="${2:-workspace/stock_pixel/partitions}"
 
+          IMPORT_CONFIGS="${IMPORT_CONFIGS:-1}"
+          IMPORT_APKS="${IMPORT_APKS:-1}"
+          VENDOR_REFERENCE="${VENDOR_REFERENCE:-1}"
+          ENABLE_BOOT_RESCUE="${ENABLE_BOOT_RESCUE:-1}"
+          BOOT_RESCUE_TIMEOUT="${BOOT_RESCUE_TIMEOUT:-180}"
+          BOOT_RESCUE_MAX_REBOOTS="${BOOT_RESCUE_MAX_REBOOTS:-5}"
 
-      # ==========================================================
-      # VALIDATE PATCH
-      # ==========================================================
+          echo "============================================================"
+          echo "HyperOS → Pixel 7 Panther Compatibility Engine"
+          echo "============================================================"
 
-      - name: "🔍 Validate Panther Compatibility"
-        run: |
-
-          set -Eeuo pipefail
-
-          ROOT="workspace/system_root"
+          if [ ! -d "$ROOT" ]; then
+              echo "ERROR: GSI root does not exist:"
+              echo "$ROOT"
+              exit 1
+          fi
 
           if [ -d "$ROOT/system/system" ]; then
               SYS="$ROOT/system/system"
@@ -2310,120 +790,1386 @@ PATCH
               SYS="$ROOT"
           fi
 
+          echo "GSI system root:"
+          echo "$SYS"
+
+          echo "Pixel reference:"
+          echo "$STOCK"
+
+          mkdir -p \
+              "$SYS/bin" \
+              "$SYS/etc/init" \
+              "$SYS/etc/permissions" \
+              "$SYS/etc/sysconfig" \
+              "$SYS/etc/vintf" \
+              "$SYS/etc/panther-stock" \
+              "$SYS/etc/panther-stock/vendor" \
+              "$SYS/etc/panther-stock/odm"
+
+          REPORT="$ROOT/panther-stock-import-report.txt"
+
+          : > "$REPORT"
+
+          PROP="$SYS/build.prop"
+
+          if [ ! -f "$PROP" ]; then
+              touch "$PROP"
+          fi
+
+          cp \
+              "$PROP" \
+              "$PROP.hyperos-original"
+
+          remove_prop()
+          {
+              local KEY="$1"
+
+              sed -i \
+                  "/^${KEY}=/d" \
+                  "$PROP" \
+                  2>/dev/null \
+                  || true
+          }
+
+          set_prop()
+          {
+              local KEY="$1"
+              local VALUE="$2"
+
+              remove_prop "$KEY"
+
+              printf '%s=%s\n' \
+                  "$KEY" \
+                  "$VALUE" \
+                  >> "$PROP"
+          }
+
+          echo "Removing conflicting product identity..."
+
+          for KEY in \
+              ro.product.brand \
+              ro.product.manufacturer \
+              ro.product.model \
+              ro.product.device \
+              ro.product.name \
+              ro.product.board \
+              ro.product.system.brand \
+              ro.product.system.manufacturer \
+              ro.product.system.model \
+              ro.product.system.device \
+              ro.product.system.name \
+              ro.product.product.brand \
+              ro.product.product.manufacturer \
+              ro.product.product.model \
+              ro.product.product.device \
+              ro.product.product.name \
+              ro.product.vendor.brand \
+              ro.product.vendor.manufacturer \
+              ro.product.vendor.model \
+              ro.product.vendor.device \
+              ro.product.vendor.name \
+              ro.product.odm.brand \
+              ro.product.odm.manufacturer \
+              ro.product.odm.model \
+              ro.product.odm.device \
+              ro.product.odm.name \
+              ro.build.product \
+              ro.board.platform \
+              ro.build.fingerprint \
+              ro.system.build.fingerprint \
+              ro.product.build.fingerprint
+          do
+              remove_prop "$KEY"
+          done
+
+          # ======================================================
+          # REAL PIXEL 7 IDENTITY
+          # ======================================================
+
+          set_prop ro.product.brand google
+          set_prop ro.product.manufacturer Google
+          set_prop ro.product.model Pixel\ 7
+          set_prop ro.product.device panther
+          set_prop ro.product.name panther
+          set_prop ro.product.board gs201
+
+          set_prop ro.board.platform gs201
+
+          set_prop ro.product.system.brand google
+          set_prop ro.product.system.manufacturer Google
+          set_prop ro.product.system.model Pixel\ 7
+          set_prop ro.product.system.device panther
+          set_prop ro.product.system.name panther
+
+          set_prop ro.product.product.brand google
+          set_prop ro.product.product.manufacturer Google
+          set_prop ro.product.product.model Pixel\ 7
+          set_prop ro.product.product.device panther
+          set_prop ro.product.product.name panther
+
+          set_prop ro.build.product panther
+
+          # ======================================================
+          # ANDROID 16
+          # ======================================================
+
+          set_prop ro.build.id BP2A.250605.031.A2
+          set_prop ro.build.display.id BP2A.250605.031.A2
+          set_prop ro.build.version.incremental 13578606
+          set_prop ro.build.version.release 16
+          set_prop ro.build.version.release_or_codename 16
+          set_prop ro.build.version.release_or_preview_display 16
+          set_prop ro.build.version.sdk 36
+          set_prop ro.build.version.codename REL
+          set_prop ro.build.version.preview_sdk 0
+          set_prop ro.build.version.preview_sdk_fingerprint REL
+          set_prop ro.build.version.security_patch 2025-06-05
+          set_prop ro.build.type user
+          set_prop ro.build.tags release-keys
+          set_prop ro.build.flavor panther-user
+
+          # ======================================================
+          # FINGERPRINT
+          # ======================================================
+
+          set_prop ro.build.fingerprint google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys
+          set_prop ro.system.build.fingerprint google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys
+          set_prop ro.product.build.fingerprint google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys
+
+          set_prop ro.system.build.id BP2A.250605.031.A2
+          set_prop ro.system.build.version.release 16
+          set_prop ro.system.build.version.sdk 36
+          set_prop ro.system.build.version.security_patch 2025-06-05
+
+          # ======================================================
+          # ARM64
+          # ======================================================
+
+          set_prop ro.product.cpu.abi arm64-v8a
+          set_prop ro.product.cpu.abilist arm64-v8a,armeabi-v7a,armeabi
+          set_prop ro.product.cpu.abilist32 armeabi-v7a,armeabi
+          set_prop ro.product.cpu.abilist64 arm64-v8a
+
+          # ======================================================
+          # TREBLE
+          # ======================================================
+
+          set_prop ro.treble.enabled true
+          set_prop ro.actionable_compatible_property.enabled true
+
+          # Do not force an arbitrary LL-NDK date into vendor compatibility.
+          remove_prop ro.llndk.api_level
+
+          # ======================================================
+          # SECURITY
+          # ======================================================
+
+          set_prop ro.secure 1
+          set_prop ro.adb.secure 1
+          set_prop ro.debuggable 0
+          set_prop ro.force.debuggable 0
+
+          # ======================================================
+          # GS201
+          # ======================================================
+
+          set_prop ro.hardware gs201
+          set_prop ro.boot.hardware gs201
+          set_prop ro.boot.hardware.platform gs201
+
+          # ======================================================
+          # GRAPHICS
+          # ======================================================
+
+          set_prop ro.hardware.vulkan pixel
+
+          # Keep these conservative. Do not force obsolete
+          # SurfaceFlinger behavior unless the source ROM requires it.
+          remove_prop debug.sf.enable_hwc_vds
+          remove_prop debug.sf.latch_unsignaled
+          remove_prop debug.sf.disable_backpressure
+          remove_prop debug.sf.use_phase_offsets_as_durations
+
+          # ======================================================
+          # ART
+          # ======================================================
+
+          set_prop dalvik.vm.useartservice true
+          set_prop dalvik.vm.usejit true
+
+          # ======================================================
+          # TELEPHONY
+          # ======================================================
+
+          set_prop ro.telephony.default_network 26
+          set_prop persist.radio.multisim.config dsds
+
+          # ======================================================
+          # EUICC
+          # ======================================================
+
+          set_prop ro.telephony.euicc true
+          set_prop persist.radio.euicc.enabled true
+          set_prop persist.radio.euicc 1
+
+          # ======================================================
+          # KEYGUARD / GOOGLE
+          # ======================================================
+
+          set_prop ro.keyguard.supported true
+          set_prop config.disableLockscreen false
+
+          set_prop ro.com.google.clientidbase android-google
+          set_prop ro.setupwizard.mode OPTIONAL
+          set_prop net.bt.name Android
+          set_prop ro.allow.mock.location 0
+
+          # ======================================================
+          # IMPORT HELPER
+          # ======================================================
+
+          import_file()
+          {
+              local PART="$1"
+              local REL="$2"
+              local MODE="$3"
+
+              local SRC="$STOCK/$PART/$REL"
+              local DEST="$SYS/$REL"
+
+              [ -f "$SRC" ] || return 1
+
+              mkdir -p "$(dirname "$DEST")"
+
+              if [ "$MODE" = "replace" ]; then
+
+                  if [ -f "$DEST" ]; then
+                      cp "$DEST" "$DEST.hyperos-backup"
+                  fi
+
+                  cp -a "$SRC" "$DEST"
+
+                  printf '%s\n' \
+                      "REPLACED $PART/$REL" \
+                      >> "$REPORT"
+
+              else
+
+                  if [ ! -e "$DEST" ]; then
+
+                      cp -a "$SRC" "$DEST"
+
+                      printf '%s\n' \
+                          "ADDED $PART/$REL" \
+                          >> "$REPORT"
+
+                  else
+
+                      printf '%s\n' \
+                          "KEPT $REL" \
+                          >> "$REPORT"
+
+                  fi
+
+              fi
+          }
+
+          # ======================================================
+          # SAFE PIXEL CONFIG IMPORT
+          # ======================================================
+
+          if [ "$IMPORT_CONFIGS" = "1" ]; then
+
+              printf '%s\n' \
+                  "" \
+                  "PIXEL FRAMEWORK CONFIGURATION" \
+                  "=============================" \
+                  >> "$REPORT"
+
+              for PART in system product system_ext; do
+
+                  SRC="$STOCK/$PART"
+
+                  [ -d "$SRC/etc" ] || continue
+
+                  while IFS= read -r FILE; do
+
+                      REL="${FILE#$SRC/}"
+
+                      case "$(basename "$FILE")" in
+
+                          *fingerprint*|*biometric*|*euicc*|*uicc*|*telephony*|*carrier*|*subscription*|*wifi*|*nfc*)
+                              import_file "$PART" "$REL" add || true
+                              ;;
+
+                      esac
+
+                  done < <(
+                      find "$SRC/etc" \
+                          -type f \
+                          \( \
+                              -iname '*fingerprint*' \
+                              -o -iname '*biometric*' \
+                              -o -iname '*euicc*' \
+                              -o -iname '*uicc*' \
+                              -o -iname '*telephony*' \
+                              -o -iname '*carrier*' \
+                              -o -iname '*subscription*' \
+                              -o -iname '*wifi*' \
+                              -o -iname '*nfc*' \
+                          \) \
+                          -print
+                  )
+
+              done
+          fi
+
+          # ======================================================
+          # SELECTIVE APK IMPORT
+          # ======================================================
+
+          if [ "$IMPORT_APKS" = "1" ]; then
+
+              printf '%s\n' \
+                  "" \
+                  "PIXEL APK CANDIDATES" \
+                  "====================" \
+                  >> "$REPORT"
+
+              for PART in system product system_ext; do
+
+                  SRC="$STOCK/$PART"
+
+                  [ -d "$SRC" ] || continue
+
+                  while IFS= read -r APK; do
+
+                      BASE="$(basename "$APK")"
+
+                      case "$BASE" in
+                          *Euicc*|*EUICC*|*euicc*)
+
+                              REL="${APK#$SRC/}"
+                              DEST="$SYS/$REL"
+
+                              if [ ! -f "$DEST" ]; then
+
+                                  mkdir -p "$(dirname "$DEST")"
+                                  cp -a "$APK" "$DEST"
+
+                                  printf '%s\n' \
+                                      "ADDED APK $PART/$REL" \
+                                      >> "$REPORT"
+                              fi
+                              ;;
+                      esac
+
+                  done < <(
+                      find "$SRC" \
+                          -type f \
+                          -name '*.apk' \
+                          -print
+                  )
+
+              done
+          fi
+
+          # ======================================================
+          # HARDWARE XML
+          # ======================================================
+
+          python3 -c '
+          from pathlib import Path
+
+          root = Path(r"""$SYS""")
+
+          files = {
+              root / "etc/permissions/panther-hardware.xml": """<?xml version="1.0" encoding="utf-8"?>
+          <permissions>
+              <feature name="android.hardware.wifi" />
+              <feature name="android.hardware.wifi.direct" />
+              <feature name="android.hardware.bluetooth" />
+              <feature name="android.hardware.camera" />
+              <feature name="android.hardware.camera.front" />
+              <feature name="android.hardware.fingerprint" />
+              <feature name="android.hardware.nfc" />
+              <feature name="android.hardware.location" />
+              <feature name="android.hardware.location.gps" />
+              <feature name="android.hardware.telephony" />
+              <feature name="android.hardware.telephony.subscription" />
+              <feature name="android.hardware.telephony.euicc" />
+              <feature name="android.hardware.usb.host" />
+          </permissions>
+          """,
+
+              root / "etc/permissions/panther-biometric.xml": """<?xml version="1.0" encoding="utf-8"?>
+          <permissions>
+              <feature name="android.hardware.fingerprint" />
+          </permissions>
+          """,
+
+              root / "etc/permissions/panther-euicc.xml": """<?xml version="1.0" encoding="utf-8"?>
+          <permissions>
+              <feature name="android.hardware.telephony.euicc" />
+          </permissions>
+          """,
+
+              root / "etc/sysconfig/panther-keyguard.xml": """<?xml version="1.0" encoding="utf-8"?>
+          <config>
+              <allow-in-data-usage-save package="com.android.systemui" />
+              <allow-in-power-save package="com.android.systemui" />
+          </config>
+          """
+          }
+
+          for path, content in files.items():
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_text(content.lstrip(), encoding="utf-8")
+          '
+
+          # ======================================================
+          # VENDOR / ODM REFERENCE
+          # ======================================================
+
+          if [ "$VENDOR_REFERENCE" = "1" ]; then
+
+              printf '%s\n' \
+                  "" \
+                  "PIXEL VENDOR / ODM REFERENCE" \
+                  "============================" \
+                  >> "$REPORT"
+
+              for PART in vendor odm; do
+
+                  SRC="$STOCK/$PART"
+
+                  [ -d "$SRC" ] || continue
+
+                  DEST="$SYS/etc/panther-stock/$PART"
+
+                  mkdir -p "$DEST"
+
+                  if [ -d "$SRC/etc/vintf" ]; then
+
+                      mkdir -p "$DEST/etc/vintf"
+
+                      cp -a \
+                          "$SRC/etc/vintf"/. \
+                          "$DEST/etc/vintf"/ \
+                          2>/dev/null \
+                          || true
+
+                  fi
+
+                  if [ -d "$SRC/etc/permissions" ]; then
+
+                      mkdir -p "$DEST/etc/permissions"
+
+                      find "$SRC/etc/permissions" \
+                          -type f \
+                          -name '*.xml' \
+                          -exec cp -a {} "$DEST/etc/permissions/" \; \
+                          2>/dev/null \
+                          || true
+
+                  fi
+
+                  if [ -d "$SRC/etc/init" ]; then
+
+                      mkdir -p "$DEST/etc/init"
+
+                      find "$SRC/etc/init" \
+                          -type f \
+                          -exec cp -a {} "$DEST/etc/init/" \; \
+                          2>/dev/null \
+                          || true
+
+                  fi
+
+                  if [ -d "$SRC/firmware" ]; then
+
+                      find "$SRC/firmware" \
+                          -type f \
+                          -printf '%P\n' \
+                          > "$DEST-firmware-index.txt" \
+                          2>/dev/null \
+                          || true
+
+                  fi
+
+                  find "$SRC" \
+                      -type f \
+                      \( \
+                          -iname '*wifi*' \
+                          -o -iname '*bluetooth*' \
+                          -o -iname '*camera*' \
+                          -o -iname '*audio*' \
+                          -o -iname '*sensor*' \
+                          -o -iname '*fingerprint*' \
+                          -o -iname '*biometric*' \
+                          -o -iname '*nfc*' \
+                          -o -iname '*gnss*' \
+                          -o -iname '*radio*' \
+                          -o -iname '*thermal*' \
+                          -o -iname '*power*' \
+                          -o -iname '*health*' \
+                          -o -iname '*usb*' \
+                          -o -iname '*gpu*' \
+                      \) \
+                      -printf '%P\n' \
+                      >> "$DEST-hal-index.txt" \
+                      2>/dev/null \
+                      || true
+
+              done
+
+          fi
+
+          # ======================================================
+          # SYSTEMUI INDEX
+          # ======================================================
+
+          find "$ROOT" \
+              -type f \
+              \( \
+                  -name SystemUI.apk \
+                  -o -name SystemUI.odex \
+                  -o -name SystemUI.vdex \
+              \) \
+              -print \
+              > "$ROOT/panther-systemui-candidates.txt" \
+              2>/dev/null \
+              || true
+
+          # ======================================================
+          # DRIVER RESOLVER
+          # ======================================================
+
+          python3 -c '
+          from pathlib import Path
+
+          p = Path(r"""$SYS/bin/panther-driver-resolver""")
+
+          content = r"""#!/system/bin/sh
+
+          TAG="PantherDriverResolver"
+          LOG="/data/local/tmp/panther-driver-resolver.log"
+
+          mkdir -p /data/local/tmp 2>/dev/null || true
+
+          logmsg()
+          {
+              echo "$*" >> "$LOG"
+              log -t "$TAG" "$*" 2>/dev/null || true
+          }
+
+          if [ "$(getprop sys.panther.driver_resolver.ran)" = "1" ]; then
+              exit 0
+          fi
+
+          setprop sys.panther.driver_resolver.ran 1
+
+          logmsg "================================================"
+          logmsg "Pixel 7 Panther compatibility resolver"
+          logmsg "================================================"
+
+          wait_path()
+          {
+              TARGET="$1"
+              TIMEOUT="$2"
+              I=0
+
+              while [ "$I" -lt "$TIMEOUT" ]; do
+
+                  if [ -e "$TARGET" ]; then
+                      logmsg "AVAILABLE $TARGET"
+                      return 0
+                  fi
+
+                  sleep 1
+                  I=$((I + 1))
+              done
+
+              logmsg "TIMEOUT $TARGET"
+              return 1
+          }
+
+          wait_path /vendor 180 || true
+          wait_path /product 180 || true
+          wait_path /system_ext 180 || true
+          wait_path /odm 180 || true
+          wait_path /vendor_dlkm 180 || true
+          wait_path /odm_dlkm 180 || true
+
+          I=0
+
+          while [ "$I" -lt 180 ]; do
+
+              READY="$(getprop apex.all.ready 2>/dev/null || true)"
+
+              if [ "$READY" = "1" ] || [ "$READY" = "true" ]; then
+                  logmsg "APEX READY"
+                  break
+              fi
+
+              sleep 1
+              I=$((I + 1))
+          done
+
+          find_exact()
+          {
+              NAME="$1"
+
+              for ROOT in \
+                  /vendor \
+                  /product \
+                  /system_ext \
+                  /system \
+                  /odm \
+                  /vendor_dlkm \
+                  /odm_dlkm \
+                  /apex
+              do
+
+                  [ -d "$ROOT" ] || continue
+
+                  RESULT="$(
+                      find "$ROOT" \
+                          -type f \
+                          -name "$NAME" \
+                          -print \
+                          2>/dev/null \
+                          | head -n 1
+                  )"
+
+                  if [ -n "$RESULT" ]; then
+                      logmsg "FOUND $NAME -> $RESULT"
+                      return 0
+                  fi
+
+              done
+
+              logmsg "NOT FOUND $NAME"
+              return 1
+          }
+
+          resolve()
+          {
+              find_exact "$1" || true
+          }
+
+          logmsg "===== WIFI ====="
+          resolve android.hardware.wifi-service
+          resolve android.hardware.wifi@1.0-service
+          resolve libwifi-hal.so
+
+          logmsg "===== BLUETOOTH ====="
+          resolve android.hardware.bluetooth-service
+          resolve android.hardware.bluetooth@1.1-service
+
+          logmsg "===== CAMERA ====="
+          resolve android.hardware.camera.provider-service
+          resolve android.hardware.camera.provider@2.7-service
+          resolve android.hardware.camera.provider@2.5-service
+
+          logmsg "===== AUDIO ====="
+          resolve android.hardware.audio.service
+          resolve android.hardware.audio@7.0-impl.so
+          resolve audio.primary.gs201.so
+
+          logmsg "===== SENSORS ====="
+          resolve android.hardware.sensors-service
+          resolve android.hardware.sensors@2.1-service
+
+          logmsg "===== FINGERPRINT ====="
+          resolve android.hardware.biometrics.fingerprint-service
+          resolve android.hardware.biometrics.fingerprint@2.1-service
+
+          logmsg "===== NFC ====="
+          resolve android.hardware.nfc-service
+          resolve android.hardware.nfc@1.2-service
+
+          logmsg "===== GNSS ====="
+          resolve android.hardware.gnss-service
+          resolve android.hardware.gnss@2.1-service
+
+          logmsg "===== USB ====="
+          resolve android.hardware.usb-service
+
+          logmsg "===== RADIO ====="
+          resolve android.hardware.radio-service
+          resolve android.hardware.radio@2.0-service
+          resolve android.hardware.radio@1.6-service
+
+          logmsg "===== GPU ====="
+          resolve vulkan.gs201.so
+          resolve libGLES_mali.so
+
+          logmsg "===== EUICC ====="
+          resolve EuiccService
+
+          logmsg "===== PROPERTIES ====="
+
+          logmsg "brand=$(getprop ro.product.brand)"
+          logmsg "manufacturer=$(getprop ro.product.manufacturer)"
+          logmsg "model=$(getprop ro.product.model)"
+          logmsg "device=$(getprop ro.product.device)"
+          logmsg "product=$(getprop ro.product.name)"
+          logmsg "board=$(getprop ro.product.board)"
+          logmsg "platform=$(getprop ro.board.platform)"
+          logmsg "android=$(getprop ro.build.version.release)"
+          logmsg "sdk=$(getprop ro.build.version.sdk)"
+          logmsg "fingerprint=$(getprop ro.build.fingerprint)"
+
+          setprop sys.panther.driver_resolver.ready 1
+
+          logmsg "Panther resolver finished."
+
+          exit 0
+          """
+
+          p.parent.mkdir(parents=True, exist_ok=True)
+          p.write_text(content.lstrip(), encoding="utf-8")
+          '
+
+          chmod 0755 \
+              "$SYS/bin/panther-driver-resolver"
+
+          # ======================================================
+          # INIT FILE
+          # ======================================================
+
+          python3 -c '
+          from pathlib import Path
+
+          p = Path(r"""$SYS/etc/init/panther-driver-resolver.rc""")
+
+          content = """service panther-driver-resolver /system/bin/panther-driver-resolver
+              class late_start
+              user root
+              group root system shell
+              disabled
+              oneshot
+
+          on property:sys.boot_completed=1
+              start panther-driver-resolver
+          """
+
+          p.parent.mkdir(parents=True, exist_ok=True)
+          p.write_text(content.lstrip(), encoding="utf-8")
+          '
+
+          # ======================================================
+          # DRIVER MAP
+          # ======================================================
+
+          python3 -c '
+          from pathlib import Path
+
+          p = Path(r"""$SYS/etc/panther-driver-map.txt""")
+
+          content = """Pixel 7 Panther Hardware Compatibility Map
+
+          SYSTEM
+          /system
+          /system_ext
+          /product
+          /vendor
+          /odm
+          /vendor_dlkm
+          /odm_dlkm
+          /apex
+
+          WIFI
+          android.hardware.wifi-service
+          android.hardware.wifi@1.0-service
+          libwifi-hal.so
+
+          BLUETOOTH
+          android.hardware.bluetooth-service
+
+          CAMERA
+          android.hardware.camera.provider-service
+          android.hardware.camera.provider@2.7-service
+
+          AUDIO
+          android.hardware.audio.service
+          android.hardware.audio@7.0-impl.so
+          audio.primary.gs201.so
+
+          SENSORS
+          android.hardware.sensors-service
+
+          FINGERPRINT
+          android.hardware.biometrics.fingerprint-service
+
+          NFC
+          android.hardware.nfc-service
+
+          GNSS
+          android.hardware.gnss-service
+
+          USB
+          android.hardware.usb-service
+
+          RADIO
+          android.hardware.radio-service
+
+          GPU
+          vulkan.gs201.so
+          libGLES_mali.so
+
+          EUICC
+          EuiccService
+          """
+
+          p.parent.mkdir(parents=True, exist_ok=True)
+          p.write_text(content.lstrip(), encoding="utf-8")
+          '
+
+          # ======================================================
+          # BOOT RESCUE
+          # ======================================================
+
+          if [ "$ENABLE_BOOT_RESCUE" = "1" ]; then
+
+              python3 -c '
+              from pathlib import Path
+
+              p = Path(r"""$SYS/bin/panther-boot-rescue""")
+
+              content = r"""#!/system/bin/sh
+
+              TAG="PantherBootRescue"
+
+              BASE="/metadata/panther-rescue"
+
+              if [ ! -d /metadata ] || ! -w /metadata ]; then
+                  BASE="/data/panther-rescue"
+              fi
+
+              if [ ! -d "$BASE" ] || [ ! -w "$BASE" ]; then
+                  BASE="/cache/panther-rescue"
+              fi
+
+              mkdir -p "$BASE" 2>/dev/null || true
+
+              LOG="$BASE/panther-boot-rescue.log"
+              STATE="$BASE/state"
+              ATTEMPTS="$BASE/attempts"
+
+              logmsg()
+              {
+                  echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"
+                  log -t "$TAG" "$*" 2>/dev/null || true
+              }
+
+              get_attempts()
+              {
+                  if [ -f "$ATTEMPTS" ]; then
+                      cat "$ATTEMPTS"
+                  else
+                      echo 0
+                  fi
+              }
+
+              set_attempts()
+              {
+                  echo "$1" > "$ATTEMPTS"
+              }
+
+              logmsg "================================================"
+              logmsg "BOOT RESCUE ENGINE LAUNCHED"
+              logmsg "================================================"
+
+              echo "IN_PROGRESS" > "$STATE"
+
+              MAX_REBOOTS="${BOOT_RESCUE_MAX_REBOOTS:-5}"
+              TIMEOUT="${BOOT_RESCUE_TIMEOUT:-180}"
+
+              I=0
+
+              while [ "$I" -lt "$TIMEOUT" ]; do
+
+                  BOOT="$(getprop sys.boot_completed 2>/dev/null || true)"
+
+                  if [ "$BOOT" = "1" ]; then
+
+                      logmsg "BOOT COMPLETED"
+
+                      echo "SUCCESS" > "$STATE"
+                      set_attempts 0
+
+                      exit 0
+                  fi
+
+                  sleep 1
+
+                  I=$((I + 1))
+
+              done
+
+              logmsg "BOOT TIMEOUT AFTER ${TIMEOUT}s"
+
+              ATTEMPT="$(get_attempts)"
+
+              case "$ATTEMPT" in
+                  ''|*[!0-9]*)
+                      ATTEMPT=0
+                      ;;
+              esac
+
+              logmsg "Current rescue attempts: $ATTEMPT"
+
+              mkdir -p "$BASE/logs" 2>/dev/null || true
+
+              logcat -b all -d \
+                  > "$BASE/logs/logcat.txt" \
+                  2>&1 \
+                  || true
+
+              if [ -d /sys/fs/pstore ]; then
+                  cp -a \
+                      /sys/fs/pstore/. \
+                      "$BASE/logs/pstore/" \
+                      2>/dev/null \
+                      || true
+              fi
+
+              if [ -d /data/tombstones ]; then
+                  cp -a \
+                      /data/tombstones/. \
+                      "$BASE/logs/tombstones/" \
+                      2>/dev/null \
+                      || true
+              fi
+
+              LOGFILE="$BASE/logs/logcat.txt"
+
+              ACTION="none"
+
+              if grep -Eqi \
+                  "FATAL EXCEPTION.*system_server|Watchdog.*system_server" \
+                  "$LOGFILE" 2>/dev/null; then
+
+                  ACTION="clear_dex"
+
+                  logmsg "Detected system_server crash."
+
+              elif grep -Eqi \
+                  "FATAL EXCEPTION.*com.android.systemui|SystemUI.*crash" \
+                  "$LOGFILE" 2>/dev/null; then
+
+                  ACTION="clear_systemui"
+
+                  logmsg "Detected SystemUI crash."
+
+              elif grep -Eqi \
+                  "CANNOT LINK EXECUTABLE|dlopen failed" \
+                  "$LOGFILE" 2>/dev/null; then
+
+                  ACTION="linker_failure"
+
+                  logmsg "Detected linker failure."
+
+              elif grep -Eqi \
+                  "ClassNotFoundException|NoSuchMethodError|VerifyError" \
+                  "$LOGFILE" 2>/dev/null; then
+
+                  ACTION="dex_failure"
+
+                  logmsg "Detected framework/Dex failure."
+
+              elif grep -Eqi \
+                  "VINTF.*check failed|vintf.*FAIL" \
+                  "$LOGFILE" 2>/dev/null; then
+
+                  ACTION="vintf_failure"
+
+                  logmsg "Detected VINTF failure."
+
+              elif grep -Eqi \
+                  "apexd.*failed" \
+                  "$LOGFILE" 2>/dev/null; then
+
+                  ACTION="apex_failure"
+
+                  logmsg "Detected APEX failure."
+
+              elif grep -Eqi \
+                  "fs_mgr.*mount.*failed" \
+                  "$LOGFILE" 2>/dev/null; then
+
+                  ACTION="mount_failure"
+
+                  logmsg "Detected filesystem mount failure."
+
+              elif grep -Eqi \
+                  "PackageManager.*Parsing.*failed" \
+                  "$LOGFILE" 2>/dev/null; then
+
+                  ACTION="package_failure"
+
+                  logmsg "Detected package parsing failure."
+
+              elif grep -Eqi \
+                  "avc: denied" \
+                  "$LOGFILE" 2>/dev/null; then
+
+                  ACTION="selinux_denial"
+
+                  logmsg "Detected SELinux denial."
+
+              elif grep -Eqi \
+                  "dm-verity" \
+                  "$LOGFILE" 2>/dev/null; then
+
+                  ACTION="verity"
+
+                  logmsg "Detected dm-verity error."
+
+              fi
+
+              logmsg "Detected action: $ACTION"
+
+              case "$ACTION" in
+
+                  clear_dex)
+                      rm -rf \
+                          /data/dalvik-cache \
+                          /data/resource-cache \
+                          "$BASE/dalvik-cache" \
+                          2>/dev/null \
+                          || true
+                      ;;
+
+                  clear_systemui)
+                      rm -rf \
+                          /data/system/package_cache \
+                          /data/system_ce/0/cache \
+                          /data/user/0/com.android.systemui/cache \
+                          2>/dev/null \
+                          || true
+                      ;;
+
+                  dex_failure)
+                      rm -rf \
+                          /data/dalvik-cache \
+                          /data/resource-cache \
+                          2>/dev/null \
+                          || true
+                      ;;
+
+                  package_failure)
+                      rm -rf \
+                          /data/system/package_cache \
+                          /data/system/package-dex \
+                          2>/dev/null \
+                          || true
+                      ;;
+
+                  selinux_denial)
+                      restorecon -RF \
+                          /data \
+                          2>/dev/null \
+                          || true
+                      ;;
+
+                  linker_failure|vintf_failure|apex_failure|mount_failure|verity)
+                      logmsg "No destructive automatic repair for $ACTION."
+                      ;;
+
+                  *)
+                      logmsg "No known automatic repair."
+                      ;;
+
+              esac
+
+              ATTEMPT=$((ATTEMPT + 1))
+
+              set_attempts "$ATTEMPT"
+
+              if [ "$ATTEMPT" -ge "$MAX_REBOOTS" ]; then
+
+                  logmsg "Maximum rescue attempts reached."
+
+                  echo "SAFE_STOP" > "$STATE"
+
+                  exit 0
+              fi
+
+              logmsg "Rescue repair completed."
+
+              echo "RESCUE_REBOOT" > "$STATE"
+
+              sync
+
+              reboot \
+                  userspace \
+                  2>/dev/null \
+                  || reboot \
+                  2>/dev/null \
+                  || true
+
+              exit 0
+              """
+
+              p.parent.mkdir(parents=True, exist_ok=True)
+              p.write_text(content.lstrip(), encoding="utf-8")
+              '
+
+              chmod 0755 \
+                  "$SYS/bin/panther-boot-rescue"
+
+              python3 -c '
+              from pathlib import Path
+
+              p = Path(r"""$SYS/etc/init/panther-boot-rescue.rc""")
+
+              content = """service panther-boot-rescue /system/bin/panther-boot-rescue
+                  class core
+                  user root
+                  group root system log shell
+                  disabled
+                  oneshot
+
+              on early-init
+                  start panther-boot-rescue
+              """
+
+              p.parent.mkdir(parents=True, exist_ok=True)
+              p.write_text(content.lstrip(), encoding="utf-8")
+              '
+
+              python3 -c '
+              from pathlib import Path
+
+              p = Path(r"""$SYS/etc/panther-boot-errors.db""")
+
+              content = """ID|PATTERN|ACTION|MAX
+              system_server_fatal|FATAL EXCEPTION.*system_server|clear_dex|2
+              systemui_fatal|FATAL EXCEPTION.*com.android.systemui|clear_systemui|2
+              linker_failure|CANNOT LINK EXECUTABLE|collect_only|2
+              linker_dlopen|dlopen failed|collect_only|2
+              dex_failure|VerifyError|clear_dex|2
+              class_failure|ClassNotFoundException|clear_dex|2
+              method_failure|NoSuchMethodError|clear_dex|2
+              vintf_failure|VINTF.*check failed|collect_only|1
+              apex_failure|apexd.*failed|collect_only|1
+              mount_failure|fs_mgr.*mount.*failed|collect_only|1
+              avc_denial|avc: denied|restorecon|2
+              package_failure|PackageManager.*Parsing.*failed|clear_package_cache|2
+              verity_error|dm-verity|collect_only|0
+              """
+
+              p.parent.mkdir(parents=True, exist_ok=True)
+              p.write_text(content.lstrip(), encoding="utf-8")
+              '
+
+          fi
+
+          # ======================================================
+          # FINAL REPORT
+          # ======================================================
+
+          python3 -c '
+          from pathlib import Path
+
+          p = Path(r"""$ROOT/panther-gsi-patch-report.txt""")
+
+          content = """HyperOS → Google Pixel 7 Panther
+          Compatibility Patch Report
+          ================================================
+
+          TARGET
+
+          Brand: google
+          Manufacturer: Google
+          Model: Pixel 7
+          Device: panther
+          Product: panther
+          Board: gs201
+
+          Android: 16
+          SDK: 36
+
+          Build ID: BP2A.250605.031.A2
+          Incremental: 13578606
+          Security Patch: 2025-06-05
+
+          Fingerprint:
+          google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys
+
+          FACTORY SOURCE
+
+          https://dl.google.com/dl/android/aosp/panther-bp2a.250605.031.a2-factory-53161cbb.zip
+
+          IMPORTANT
+
+          Pixel vendor/ODM binaries are NOT blindly copied into /system.
+
+          The factory image is used as a compatibility reference.
+
+          The device vendor/ODM stack remains responsible for the
+          actual Pixel 7 hardware implementation.
+
+          """
+
+          p.write_text(content, encoding="utf-8")
+          '
+
+          echo
+          echo "============================================================"
+          echo "Panther compatibility engine completed"
+          echo "============================================================"
+
+          echo "System root:"
+          echo "$SYS"
+
+          echo
+          echo "Staged Pixel reference files:"
+          find "$SYS/etc/panther-stock" \
+              -type f \
+              2>/dev/null \
+              | wc -l
+
+
+      # ==========================================================
+      # APPLY PATCH
+      # ==========================================================
+
+      - name: "🧩 Apply Pixel 7 Panther Compatibility"
+        if: ${{ inputs.enable_aggressive_patches }}
+        env:
+          IMPORT_CONFIGS: ${{ inputs.import_framework_configs && '1' || '0' }}
+          IMPORT_APKS: ${{ inputs.import_missing_apks && '1' || '0' }}
+          VENDOR_REFERENCE: ${{ inputs.aggressive_vendor_reference && '1' || '0' }}
+          ENABLE_BOOT_RESCUE: ${{ inputs.enable_boot_rescue && '1' || '0' }}
+          BOOT_RESCUE_TIMEOUT: ${{ inputs.boot_rescue_timeout }}
+          BOOT_RESCUE_MAX_REBOOTS: ${{ inputs.boot_rescue_max_reboots }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          bash \
+            scripts/patch_hyperos_panther.sh \
+            workspace/system_root \
+            workspace/stock_pixel/partitions
+
+
+      # ==========================================================
+      # VALIDATE PATCH
+      # ==========================================================
+
+      - name: "🔍 Validate Panther Compatibility"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          ROOT="workspace/system_root"
+
+          if [ -d "$ROOT/system/system" ]; then
+            SYS="$ROOT/system/system"
+          elif [ -d "$ROOT/system" ]; then
+            SYS="$ROOT/system"
+          else
+            SYS="$ROOT"
+          fi
 
           echo "System:"
           echo "$SYS"
 
-
           REQUIRED=(
-
             "$SYS/build.prop"
-
             "$SYS/bin/panther-driver-resolver"
-
             "$SYS/etc/init/panther-driver-resolver.rc"
-
             "$SYS/etc/panther-driver-map.txt"
-
             "$SYS/etc/permissions/panther-hardware.xml"
-
             "$SYS/etc/permissions/panther-biometric.xml"
-
             "$SYS/etc/permissions/panther-euicc.xml"
-
             "$SYS/etc/sysconfig/panther-keyguard.xml"
-
           )
 
+          if [ "${{ inputs.enable_boot_rescue }}" = "true" ]; then
+            REQUIRED+=(
+              "$SYS/bin/panther-boot-rescue"
+              "$SYS/etc/init/panther-boot-rescue.rc"
+              "$SYS/etc/panther-boot-errors.db"
+            )
+          fi
 
           for FILE in "${REQUIRED[@]}"; do
 
-              if [ -f "$FILE" ]; then
-                  echo "PASS $FILE"
-              else
-                  echo "FAIL $FILE"
-                  exit 1
-              fi
+            if [ -f "$FILE" ]; then
+              echo "PASS $FILE"
+            else
+              echo "FAIL $FILE"
+              exit 1
+            fi
 
           done
-
 
           echo
           echo "============================================================"
           echo "TARGET PROPERTIES"
           echo "============================================================"
 
-
           grep -E \
-            '^(ro.product.brand|ro.product.manufacturer|ro.product.model|ro.product.device|ro.product.name|ro.product.board|ro.board.platform|ro.build.id|ro.build.version.release|ro.build.version.sdk|ro.build.version.security_patch|ro.build.fingerprint|ro.system.build.fingerprint|ro.telephony.euicc)=' \
-            "$SYS/build.prop"
-
+            '^(ro\.product\.brand|ro\.product\.manufacturer|ro\.product\.model|ro\.product\.device|ro\.product\.name|ro\.product\.board|ro\.board\.platform|ro\.build\.id|ro\.build\.version\.release|ro\.build\.version\.sdk|ro\.build\.version\.security_patch|ro\.build\.fingerprint|ro\.system\.build\.fingerprint|ro\.telephony\.euicc)=' \
+            "$SYS/build.prop" \
+            || true
 
           echo
           echo "============================================================"
-          echo "PIXEL IMPORT REPORT"
+          echo "PATCH REPORT"
           echo "============================================================"
 
           cat \
-            "$ROOT/panther-stock-import-report.txt"
+            "$ROOT/panther-stock-import-report.txt" \
+            2>/dev/null \
+            || true
 
 
       # ==========================================================
-      # IMAGE SIZE CALCULATION
+      # IMAGE SIZE
       # ==========================================================
 
       - name: "📐 Calculate Final Image Size"
-        env:
-          FS_TYPE: ${{ inputs.fs_type }}
-
+        shell: bash
         run: |
-
           set -Eeuo pipefail
 
           ROOT="workspace/system_root"
 
           if [ -d "$ROOT/system/system" ]; then
-              SOURCE="$ROOT/system/system"
+            SOURCE="$ROOT/system/system"
           elif [ -d "$ROOT/system" ]; then
-              SOURCE="$ROOT/system"
+            SOURCE="$ROOT/system"
           else
-              SOURCE="$ROOT"
+            SOURCE="$ROOT"
           fi
 
-
           mkdir -p workspace/output
-
 
           CONTENT_BYTES="$(
             du -s -B1 "$SOURCE" |
             awk '{print $1}'
           )"
 
-
-          # 2 GiB safety headroom for ext4.
-          # This avoids the common failure where a large HyperOS
-          # GSI runs out of space during installation.
-
-          HEADROOM=$((2 * 1024 * 1024 * 1024))
+          # 1 GiB headroom.
+          HEADROOM=$((1024 * 1024 * 1024))
 
           IMAGE_BYTES=$((CONTENT_BYTES + HEADROOM))
 
-
-          # 4 MiB alignment.
-
+          # Align to 4 MiB.
           IMAGE_BYTES=$(
             (
               IMAGE_BYTES + 4194303
             ) / 4194304 * 4194304
           )
 
-
-          echo "CONTENT_BYTES=$CONTENT_BYTES" \
-            >> "$GITHUB_ENV"
-
-          echo "IMAGE_BYTES=$IMAGE_BYTES" \
-            >> "$GITHUB_ENV"
-
+          echo "CONTENT_BYTES=$CONTENT_BYTES" >> "$GITHUB_ENV"
+          echo "IMAGE_BYTES=$IMAGE_BYTES" >> "$GITHUB_ENV"
 
           echo
           echo "Content:"
@@ -2435,17 +2181,15 @@ PATCH
 
 
       # ==========================================================
-      # REBUILD FINAL GSI
+      # REBUILD GSI
       # ==========================================================
 
       - name: "🏗️ Rebuild Patched GSI Image"
         env:
-
           OUTPUT_NAME: ${{ inputs.output_name }}
           FS_TYPE: ${{ inputs.fs_type }}
-
+        shell: bash
         run: |
-
           set -Eeuo pipefail
 
           ROOT="workspace/system_root"
@@ -2453,24 +2197,20 @@ PATCH
 
           mkdir -p "$OUT"
 
-
           if [ -d "$ROOT/system/system" ]; then
-              SOURCE="$ROOT/system/system"
+            SOURCE="$ROOT/system/system"
           elif [ -d "$ROOT/system" ]; then
-              SOURCE="$ROOT/system"
+            SOURCE="$ROOT/system"
           else
-              SOURCE="$ROOT"
+            SOURCE="$ROOT"
           fi
 
-
           IMG="$OUT/${OUTPUT_NAME}.img"
-
 
           rm -f \
             "$IMG" \
             "$IMG.xz" \
             "$IMG.gz"
-
 
           echo
           echo "============================================================"
@@ -2483,124 +2223,105 @@ PATCH
           echo "Filesystem:"
           echo "$FS_TYPE"
 
-
-          # ========================================================
-          # EXT4
-          # ========================================================
-
           if [ "$FS_TYPE" = "ext4" ]; then
 
-              truncate \
-                -s "$IMAGE_BYTES" \
-                "$IMG"
+            truncate \
+              -s "$IMAGE_BYTES" \
+              "$IMG"
 
+            mkfs.ext4 \
+              -F \
+              -L system \
+              -O metadata_csum,64bit \
+              "$IMG"
 
-              mkfs.ext4 \
-                -F \
-                -L system \
-                -O metadata_csum,64bit \
-                "$IMG"
+            TEMP_MOUNT="$(mktemp -d)"
 
+            cleanup()
+            {
+              set +e
 
-              TEMP_MOUNT="$(mktemp -d)"
+              if mountpoint -q "$TEMP_MOUNT"; then
+                sudo umount "$TEMP_MOUNT" || true
+              fi
 
+              rmdir "$TEMP_MOUNT" 2>/dev/null || true
+            }
 
-              cleanup()
-              {
-                  set +e
+            trap cleanup EXIT
 
-                  if mountpoint -q "$TEMP_MOUNT"; then
-                      sudo umount "$TEMP_MOUNT"
-                  fi
+            sudo mount \
+              -o loop \
+              "$IMG" \
+              "$TEMP_MOUNT"
 
-                  rmdir "$TEMP_MOUNT" 2>/dev/null || true
-              }
+            sudo cp \
+              -a \
+              "$SOURCE"/. \
+              "$TEMP_MOUNT"/
 
-              trap cleanup EXIT
+            sync
 
+            sudo umount "$TEMP_MOUNT"
 
-              sudo mount \
-                -o loop \
-                "$IMG" \
-                "$TEMP_MOUNT"
+            rmdir "$TEMP_MOUNT"
 
+            trap - EXIT
 
-              sudo cp \
-                -a \
-                "$SOURCE"/. \
-                "$TEMP_MOUNT"/
-
-
-              sync
-
-
-              sudo umount \
-                "$TEMP_MOUNT"
-
-
-              rmdir \
-                "$TEMP_MOUNT"
-
-
-              trap - EXIT
-
-
-              echo
-              echo "Running filesystem check..."
-
-              e2fsck \
-                -fy \
-                "$IMG" \
-                || true
-
-
-          # ========================================================
-          # EROFS
-          # ========================================================
+            e2fsck \
+              -fy \
+              "$IMG" \
+              || true
 
           elif [ "$FS_TYPE" = "erofs" ]; then
 
-              mkfs.erofs \
-                -zlz4hc \
-                "$IMG" \
-                "$SOURCE"
+            mkfs.erofs \
+              -zlz4hc \
+              "$IMG" \
+              "$SOURCE"
 
           else
 
-              echo "Unsupported filesystem:"
-              echo "$FS_TYPE"
+            echo "Unsupported filesystem:"
+            echo "$FS_TYPE"
 
-              exit 1
+            exit 1
 
           fi
 
+          # ======================================================
+          # VERIFY IMAGE BEFORE SPARSIFYING
+          # ======================================================
 
-          # ========================================================
-          # SPARSE IMAGE
-          # ========================================================
+          file "$IMG"
+
+          if [ "$FS_TYPE" = "ext4" ]; then
+            sudo blkid "$IMG" || true
+          fi
+
+          # ======================================================
+          # CREATE SPARSE COPY
+          # ======================================================
 
           if command -v img2simg >/dev/null 2>&1; then
 
-              img2simg \
-                "$IMG" \
+            img2simg \
+              "$IMG" \
+              "$OUT/${OUTPUT_NAME}.sparse.img"
+
+            if [ -f "$OUT/${OUTPUT_NAME}.sparse.img" ]; then
+
+              mv \
                 "$OUT/${OUTPUT_NAME}.sparse.img" \
-                || true
+                "$IMG"
 
-
-              if [ -f "$OUT/${OUTPUT_NAME}.sparse.img" ]; then
-
-                  mv \
-                    "$OUT/${OUTPUT_NAME}.sparse.img" \
-                    "$IMG"
-
-              fi
+            fi
 
           fi
 
-
-          # ========================================================
+          # ======================================================
           # COMPRESS
-          # ========================================================
+          # ======================================================
 
           xz \
             -T0 \
@@ -2609,13 +2330,11 @@ PATCH
             "$IMG" \
             > "$IMG.xz"
 
-
           gzip \
             -9 \
             -c \
             "$IMG" \
             > "$IMG.gz"
-
 
           echo
           echo "FINAL OUTPUT:"
@@ -2623,30 +2342,27 @@ PATCH
 
 
       # ==========================================================
-      # FINAL VALIDATION
+      # VALIDATE FINAL IMAGE
       # ==========================================================
 
       - name: "🧪 Validate Final GSI Image"
+        shell: bash
         run: |
-
           set -Eeuo pipefail
 
           OUT="workspace/output"
-
           IMG="$OUT/${{ inputs.output_name }}.img"
-
 
           echo
           echo "============================================================"
           echo "FINAL IMAGE"
           echo "============================================================"
 
+          test -f "$IMG"
+
           ls -lh "$IMG"
 
           file "$IMG"
-
-          sudo blkid "$IMG" || true
-
 
           echo
           echo "Compressed:"
@@ -2654,26 +2370,29 @@ PATCH
             "$IMG.xz" \
             "$IMG.gz"
 
-
           echo
           echo "Target fingerprint:"
-          echo \
+          printf '%s\n' \
             "google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys"
 
 
       # ==========================================================
-      # CHECKSUMS / METADATA
+      # METADATA
       # ==========================================================
 
       - name: "🔑 Generate Checksums and Build Metadata"
+        env:
+          SOURCE_ROM: ${{ inputs.rom_url }}
+          FACTORY_URL: ${{ inputs.factory_url }}
+          OUTPUT_NAME: ${{ inputs.output_name }}
+          FS_TYPE: ${{ inputs.fs_type }}
+        shell: bash
         run: |
-
           set -Eeuo pipefail
 
           OUT="workspace/output"
 
           cd "$OUT"
-
 
           sha256sum \
             *.img \
@@ -2681,187 +2400,121 @@ PATCH
             *.img.gz \
             > SHA256SUMS.txt
 
-
           RAW_BYTES="$(
             stat \
               -c '%s' \
-              "${{ inputs.output_name }}.img"
+              "${OUTPUT_NAME}.img"
           )"
 
-
-          COMPRESSED_XZ="$(
+          XZ_BYTES="$(
             stat \
               -c '%s' \
-              "${{ inputs.output_name }}.img.xz"
+              "${OUTPUT_NAME}.img.xz"
           )"
 
-
-          COMPRESSED_GZ="$(
+          GZ_BYTES="$(
             stat \
               -c '%s' \
-              "${{ inputs.output_name }}.img.gz"
+              "${OUTPUT_NAME}.img.gz"
           )"
 
+          python3 -c '
+          import os
+          from pathlib import Path
+          from datetime import datetime, timezone
 
-          cat > build-info.txt <<EOF
+          out = Path("build-info.txt")
 
-HyperOS → Google Pixel 7 Panther
-================================
+          source = os.environ.get("SOURCE_ROM", "")
+          factory = os.environ.get("FACTORY_URL", "")
+          output_name = os.environ.get("OUTPUT_NAME", "")
+          fs_type = os.environ.get("FS_TYPE", "")
 
-SOURCE ROM
-----------
+          raw_bytes = os.stat(f"{output_name}.img").st_size
+          xz_bytes = os.stat(f"{output_name}.img.xz").st_size
+          gz_bytes = os.stat(f"{output_name}.img.gz").st_size
 
-${{ inputs.rom_url }}
+          text = f"""HyperOS → Google Pixel 7 Panther
+          ================================================
 
+          SOURCE ROM
+          {source}
 
-PIXEL FACTORY
--------------
+          PIXEL FACTORY
+          {factory}
 
-${{ inputs.factory_url }}
+          TARGET
 
+          Brand: google
+          Manufacturer: Google
+          Model: Pixel 7
+          Device: panther
+          Product: panther
+          Board: gs201
 
-TARGET
-------
+          ANDROID
 
-Brand:
-Android
+          Version: 16
+          SDK: 36
+          Build ID: BP2A.250605.031.A2
+          Incremental: 13578606
+          Security Patch: 2025-06-05
 
-Manufacturer:
-Google
+          FINGERPRINT
 
-Model:
-Panther
+          google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys
 
-Device:
-panther
+          PIXEL PARTITIONS
 
-Product:
-panther
+          system.img: analyzed
+          product.img: analyzed
+          system_ext.img: analyzed
+          vendor.img: analyzed / reference
+          vendor_dlkm.img: analyzed
+          odm.img: analyzed
+          odm_dlkm.img: analyzed
 
-Board:
-gs201
+          COMPATIBILITY
 
+          Pixel identity: enabled
+          Android 16: enabled
+          GS201: enabled
+          Treble: enabled
+          Pixel configuration: enabled
+          eUICC: enabled
+          Biometrics: enabled
+          Telephony: enabled
+          Vendor HAL index: enabled
+          Runtime resolver: enabled
 
-ANDROID
--------
+          BOOT RESCUE
 
-Version:
-16
+          Persistent rescue engine: enabled
 
-SDK:
-36
+          IMAGE
 
-Build ID:
-BP2A.250605.031.A2
+          Filesystem: {fs_type}
+          Raw image bytes: {raw_bytes}
+          XZ bytes: {xz_bytes}
+          GZIP bytes: {gz_bytes}
 
-Incremental:
-13578606
+          GENERATED
 
-Security Patch:
-2025-06-05
+          {datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+          """
 
-
-FINGERPRINT
------------
-
-google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys
-
-
-PIXEL PARTITIONS
-----------------
-
-system.img:
-ANALYZED
-
-product.img:
-ANALYZED
-
-system_ext.img:
-ANALYZED
-
-vendor.img:
-ANALYZED / HAL REFERENCE
-
-vendor_dlkm.img:
-ANALYZED
-
-odm.img:
-ANALYZED
-
-odm_dlkm.img:
-ANALYZED
-
-
-COMPATIBILITY
--------------
-
-Pixel identity:
-ENABLED
-
-Android 16:
-ENABLED
-
-GS201:
-ENABLED
-
-Treble:
-ENABLED
-
-Pixel configuration:
-ENABLED
-
-eUICC:
-ENABLED
-
-Biometric:
-ENABLED
-
-Telephony:
-ENABLED
-
-Vendor HAL index:
-ENABLED
-
-Runtime resolver:
-ENABLED
-
-APEX detection:
-ENABLED
-
-
-IMAGE
------
-
-Filesystem:
-${{ inputs.fs_type }}
-
-Raw image bytes:
-$RAW_BYTES
-
-XZ bytes:
-$COMPRESSED_XZ
-
-GZIP bytes:
-$COMPRESSED_GZ
-
-
-GENERATED
----------
-
-$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-
-EOF
-
+          out.write_text(text, encoding="utf-8")
+          '
 
           cp \
             ../system_root/panther-gsi-patch-report.txt \
             ./panther-gsi-patch-report.txt
 
-
           cp \
             ../system_root/panther-stock-import-report.txt \
-            ./panther-stock-import-report.txt
-
+            ./panther-stock-import-report.txt \
+            2>/dev/null \
+            || true
 
           cp \
             ../stock_pixel/reports/stock-build-props.txt \
@@ -2869,20 +2522,17 @@ EOF
             2>/dev/null \
             || true
 
-
           cp \
             ../stock_pixel/reports/important-properties.txt \
             ./pixel-important-properties.txt \
             2>/dev/null \
             || true
 
-
           cp \
             ../stock_pixel/index/files.tsv \
             ./pixel-files.tsv \
             2>/dev/null \
             || true
-
 
           cp \
             ../stock_pixel/index/path-index.txt \
@@ -2896,18 +2546,33 @@ EOF
       # ==========================================================
 
       - name: "📝 Generate Release Notes"
+        env:
+          OUTPUT_NAME: ${{ inputs.output_name }}
+          SOURCE_ROM: ${{ inputs.rom_url }}
+          FACTORY_URL: ${{ inputs.factory_url }}
+          FS_TYPE: ${{ inputs.fs_type }}
+        shell: bash
         run: |
+          set -Eeuo pipefail
 
-          cat > workspace/output/release-notes.md <<EOF
-# HyperOS → Google Pixel 7 Panther
+          python3 -c '
+          import os
+          from pathlib import Path
+
+          output = os.environ["OUTPUT_NAME"]
+          source = os.environ["SOURCE_ROM"]
+          factory = os.environ["FACTORY_URL"]
+          fs_type = os.environ["FS_TYPE"]
+
+          text = f"""# HyperOS → Google Pixel 7 Panther
 
 ## Target
 
 | Property | Value |
 |---|---|
-| Brand | Android |
+| Brand | google |
 | Manufacturer | Google |
-| Model | Panther |
+| Model | Pixel 7 |
 | Device | panther |
 | Product | panther |
 | Board | gs201 |
@@ -2919,70 +2584,50 @@ EOF
 
 ## Fingerprint
 
-\`google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys\`
+`google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys`
+
+## Source ROM
+
+{source}
 
 ## Pixel Factory Reference
 
-The workflow downloads the specified Panther factory package and analyzes:
+{factory}
 
-- system.img
-- product.img
-- system_ext.img
-- vendor.img
-- vendor_dlkm.img
-- odm.img
-- odm_dlkm.img
+## Filesystem
+
+{fs_type}
 
 ## Compatibility Engine
 
-The build performs:
+The workflow performs:
 
-- Pixel identity conversion
-- Android 16 property conversion
-- GS201 property configuration
+- Pixel 7 identity conversion
+- Android 16 property configuration
+- GS201 configuration
 - Treble configuration
 - ARM64 configuration
-- ART configuration
-- SurfaceFlinger configuration
-- telephony configuration
-- eUICC configuration
-- biometric configuration
-- Pixel permission import
-- Pixel framework configuration import
-- Pixel APK candidate import
+- Pixel framework/config analysis
+- selective Pixel APK import
 - vendor HAL indexing
 - ODM HAL indexing
 - VINTF indexing
 - firmware indexing
 - APEX readiness detection
 - runtime hardware discovery
+- boot-error rescue support
 
 ## Runtime Resolver
 
 Installed:
 
-\`/system/bin/panther-driver-resolver\`
+`/system/bin/panther-driver-resolver`
 
 Init:
 
-\`/system/etc/init/panther-driver-resolver.rc\`
+`/system/etc/init/panther-driver-resolver.rc`
 
-The resolver waits for:
-
-- /system
-- /system_ext
-- /product
-- /vendor
-- /odm
-- /vendor_dlkm
-- /odm_dlkm
-- /apex
-
-and waits for:
-
-\`apex.all.ready=1\`
-
-It then searches for:
+The resolver searches the device runtime stack for compatible:
 
 - Wi-Fi
 - Bluetooth
@@ -2994,18 +2639,41 @@ It then searches for:
 - GNSS
 - USB
 - Radio
-- GPU/Vulkan
+- GPU
 - eUICC
+
+## Boot Rescue
+
+Installed:
+
+`/system/bin/panther-boot-rescue`
+
+The rescue engine:
+
+- records boot state
+- waits for `sys.boot_completed`
+- captures logcat after a timeout
+- captures pstore when available
+- checks tombstones
+- detects common framework/linker/VINTF/APEX/mount failures
+- performs limited safe cache/restorecon repairs
+- records persistent rescue attempts
+- stops automatic rebooting after the configured maximum
 
 ## Important Architecture Note
 
-The workflow does **not** blindly move Pixel vendor HAL binaries into /system.
+Pixel vendor/ODM binaries are **not blindly copied into `/system`**.
 
-The Pixel factory vendor/ODM partitions are primarily used as hardware compatibility references because Android's system/vendor separation, linker namespaces, VNDK, VINTF and SELinux rules must remain intact.
+The Pixel factory package is used as a compatibility reference. The actual Pixel 7 vendor/ODM stack remains responsible for the hardware implementation.
 
-When this GSI is used on an actual Pixel 7, the device's existing Pixel vendor/ODM stack remains the primary hardware implementation.
+This avoids blindly mixing incompatible vendor HALs, linker namespaces, VNDK libraries, VINTF declarations and SELinux policy into the GSI.
+"""
 
-EOF
+          Path("workspace/output/release-notes.md").write_text(
+              text,
+              encoding="utf-8"
+          )
+          '
 
 
       # ==========================================================
@@ -3015,28 +2683,21 @@ EOF
       - name: "📤 Upload Patched GSI"
         uses: actions/upload-artifact@v6
         with:
-
           name: ${{ inputs.output_name }}
-
           path: |
-
             workspace/output/*.img
             workspace/output/*.img.xz
             workspace/output/*.img.gz
-
             workspace/output/SHA256SUMS.txt
             workspace/output/build-info.txt
             workspace/output/release-notes.md
-
             workspace/output/panther-gsi-patch-report.txt
             workspace/output/panther-stock-import-report.txt
-
             workspace/output/stock-build-props.txt
             workspace/output/pixel-important-properties.txt
-
             workspace/output/pixel-files.tsv
             workspace/output/pixel-path-index.txt
-
+          if-no-files-found: error
           retention-days: 7
 
 
@@ -3046,36 +2707,23 @@ EOF
 
       - name: "🏷️ Create GitHub Release"
         uses: softprops/action-gh-release@v3.0.3
-
         with:
-
           tag_name: "v${{ github.run_number }}-${{ github.run_id }}"
-
           name: "${{ inputs.output_name }} — Pixel 7 Panther"
-
-          body_path:
-            workspace/output/release-notes.md
-
+          body_path: workspace/output/release-notes.md
           files: |
-
             workspace/output/*.img
             workspace/output/*.img.xz
             workspace/output/*.img.gz
-
             workspace/output/SHA256SUMS.txt
-
             workspace/output/build-info.txt
             workspace/output/release-notes.md
-
             workspace/output/panther-gsi-patch-report.txt
             workspace/output/panther-stock-import-report.txt
-
             workspace/output/stock-build-props.txt
             workspace/output/pixel-important-properties.txt
-
             workspace/output/pixel-files.tsv
             workspace/output/pixel-path-index.txt
-
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -3087,35 +2735,38 @@ EOF
       - name: "📨 Sync Release to Telegram"
         if: success()
         continue-on-error: true
-
         env:
-
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
+          OUTPUT_NAME: ${{ inputs.output_name }}
+          RELEASE_URL: "${{ github.server_url }}/${{ github.repository }}/releases/tag/v${{ github.run_number }}-${{ github.run_id }}"
+        shell: bash
         run: |
+          set -Eeuo pipefail
 
-          if [ -z "$TELEGRAM_BOT_TOKEN" ] ||
-             [ -z "$TELEGRAM_CHAT_ID" ]; then
-
-              echo "Telegram secrets not configured."
-              exit 0
-
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] ||
+             [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+            echo "Telegram secrets not configured."
+            exit 0
           fi
 
+          python3 -c '
+          import os
+          from pathlib import Path
 
-          cat > workspace/output/telegram-message.html <<EOF
+          name = os.environ["OUTPUT_NAME"]
+          release = os.environ["RELEASE_URL"]
 
-<b>${{ inputs.output_name }}</b>
+          text = f"""<b>{name}</b>
 
 <b>HyperOS → Google Pixel 7 Panther</b>
 
 Android: 16
 SDK: 36
 
-Brand: Android
+Brand: google
 Manufacturer: Google
-Model: Panther
+Model: Pixel 7
 Device: panther
 Board: gs201
 
@@ -3127,7 +2778,7 @@ Fingerprint:
 system.img: analyzed
 product.img: analyzed
 system_ext.img: analyzed
-vendor.img: HAL reference
+vendor.img: reference
 vendor_dlkm.img: analyzed
 odm.img: analyzed
 odm_dlkm.img: analyzed
@@ -3160,12 +2811,26 @@ Radio: resolver
 GPU: resolver
 eUICC: resolver
 
-<a href="${{ github.server_url }}/${{ github.repository }}/releases/tag/v${{ github.run_number }}-${{ github.run_id }}">Open GitHub Release</a>
+<b>Boot Rescue</b>
 
-EOF
+Persistent boot-error rescue engine: enabled
 
+<a href="{release}">Open GitHub Release</a>
+"""
 
-          bash scripts/send_telegram_message.sh \
+          Path("workspace/output/telegram-message.html").write_text(
+              text,
+              encoding="utf-8"
+          )
+          '
+
+          if [ ! -x scripts/send_telegram_message.sh ]; then
+            echo "Telegram helper not present; skipping."
+            exit 0
+          fi
+
+          bash \
+            scripts/send_telegram_message.sh \
             "$TELEGRAM_BOT_TOKEN" \
             "$TELEGRAM_CHAT_ID" \
             workspace/output/telegram-message.html
