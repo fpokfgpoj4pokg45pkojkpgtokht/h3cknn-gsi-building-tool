@@ -1,4 +1,4 @@
-```yaml
+
 name: "🔨 Build Source-Based Treble GSI"
 
 on:
@@ -607,4 +607,3 @@ jobs:
             "$TELEGRAM_BOT_TOKEN" \
             "$TELEGRAM_CHAT_ID" \
             android_source/out_gsi/telegram-message.html
-```
