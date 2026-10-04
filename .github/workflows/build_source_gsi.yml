@@ -1,3 +1,4 @@
+```yaml
 name: "🔨 Build Source-Based Treble GSI"
 
 on:
@@ -8,21 +9,25 @@ on:
         required: true
         default: "https://github.com/LineageOS/android.git"
         type: string
+
       manifest_branch:
         description: "🌿 Manifest Branch"
         required: true
         default: "lineage-21.0"
         type: string
+
       treble_branch:
         description: "🌿 TrebleDroid Revision / Branch"
         required: true
         default: "android-14.0"
         type: string
+
       variant:
         description: "TrebleDroid target: arm64/arm/a64, A-only/A-B, apps/root suffixes"
         required: true
         default: "treble_arm64_bvN"
         type: string
+
       build_type:
         description: "🛠️ Build Type"
         required: true
@@ -31,59 +36,182 @@ on:
         options:
           - "userdebug"
           - "user"
+
       target_model:
-        description: "Optional target model for compatibility warnings (example: SM-M127F)"
+        description: "📱 Target device for compatibility checks"
         required: false
-        default: "generic"
+        default: "Pixel 7 (panther)"
         type: string
 
 jobs:
   build_source_gsi:
     runs-on: ubuntu-24.04
-    # Allow the workflow to create releases
+
     permissions:
       contents: write
 
     steps:
+
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
+
       - name: "📦 Checkout Repository"
         uses: actions/checkout@v5
 
+      # ============================================================
+      # DISK CLEANUP
+      # ============================================================
+
       - name: "🧹 Maximize Runner Disk Space"
+        shell: bash
         run: |
+          set -euo pipefail
+
+          if [ ! -f "scripts/clean_disk.sh" ]; then
+            echo "ERROR: scripts/clean_disk.sh not found."
+            exit 1
+          fi
+
           chmod +x scripts/clean_disk.sh
           bash scripts/clean_disk.sh
 
+      # ============================================================
+      # DEPENDENCIES + REPO
+      # ============================================================
+
       - name: "⚙️ Setup Build Dependencies & Repo Tool"
+        shell: bash
         run: |
+          set -euo pipefail
+
+          if [ ! -f "scripts/setup_deps.sh" ]; then
+            echo "ERROR: scripts/setup_deps.sh not found."
+            exit 1
+          fi
+
           chmod +x scripts/setup_deps.sh
           bash scripts/setup_deps.sh
-          sudo curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
+
+          sudo curl -fsSL \
+            https://storage.googleapis.com/git-repo-downloads/repo \
+            -o /usr/local/bin/repo
+
           sudo chmod a+rx /usr/local/bin/repo
 
+          repo --version
+
+      # ============================================================
+      # VERIFY SOURCE SCRIPTS
+      # ============================================================
+
+      - name: "🔍 Validate Build Scripts"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          REQUIRED_SCRIPTS=(
+            "source/sync_and_patch.sh"
+            "source/build_source.sh"
+            "scripts/validate_gsi_output.sh"
+            "scripts/check_gsi_compatibility.sh"
+            "scripts/send_telegram_message.sh"
+          )
+
+          for script in "${REQUIRED_SCRIPTS[@]}"; do
+            if [ ! -f "$script" ]; then
+              echo "ERROR: Missing required script: $script"
+              exit 1
+            fi
+
+            chmod +x "$script"
+
+            echo "Checking syntax: $script"
+            bash -n "$script"
+          done
+
+          echo "All build scripts passed Bash syntax validation."
+
+      # ============================================================
+      # SYNC SOURCE TREE
+      # ============================================================
+
       - name: "🔄 Sync Source Tree & Apply Treble Patches"
+        shell: bash
         env:
           MANIFEST_URL_INPUT: ${{ inputs.manifest_url }}
           MANIFEST_BRANCH_INPUT: ${{ inputs.manifest_branch }}
           TREBLE_BRANCH_INPUT: ${{ inputs.treble_branch }}
         run: |
-          chmod +x source/*.sh
+          set -euo pipefail
+
+          mkdir -p "$GITHUB_WORKSPACE/android_source"
+
           bash source/sync_and_patch.sh \
             "$MANIFEST_URL_INPUT" \
             "$MANIFEST_BRANCH_INPUT" \
             "$TREBLE_BRANCH_INPUT" \
             "$GITHUB_WORKSPACE/android_source"
 
+      # ============================================================
+      # BUILD
+      # ============================================================
+
       - name: "🏗️ Compile System Image"
+        shell: bash
         env:
           VARIANT_INPUT: ${{ inputs.variant }}
           BUILD_TYPE_INPUT: ${{ inputs.build_type }}
         run: |
+          set -euo pipefail
+
+          if [ ! -d "$GITHUB_WORKSPACE/android_source" ]; then
+            echo "ERROR: Android source directory does not exist."
+            exit 1
+          fi
+
           bash source/build_source.sh \
             "$GITHUB_WORKSPACE/android_source" \
             "$VARIANT_INPUT" \
             "$BUILD_TYPE_INPUT"
 
-      - name: "🔑 Generate Checksums"
+      # ============================================================
+      # VERIFY BUILD OUTPUT
+      # ============================================================
+
+      - name: "🔎 Verify GSI Output"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT_DIR="$GITHUB_WORKSPACE/android_source/out_gsi"
+
+          if [ ! -d "$OUT_DIR" ]; then
+            echo "ERROR: GSI output directory does not exist:"
+            echo "$OUT_DIR"
+            exit 1
+          fi
+
+          echo "Contents of output directory:"
+          find "$OUT_DIR" -maxdepth 1 -type f -printf '%f\n' | sort
+
+          XZ_COUNT=$(find "$OUT_DIR" -maxdepth 1 -type f -name '*.img.xz' | wc -l)
+          GZ_COUNT=$(find "$OUT_DIR" -maxdepth 1 -type f -name '*.img.gz' | wc -l)
+
+          if [ "$XZ_COUNT" -eq 0 ] && [ "$GZ_COUNT" -eq 0 ]; then
+            echo "ERROR: No compressed GSI images were produced."
+            exit 1
+          fi
+
+          echo "Found $XZ_COUNT .img.xz image(s)."
+          echo "Found $GZ_COUNT .img.gz image(s)."
+
+      # ============================================================
+      # CHECKSUMS + COMPATIBILITY
+      # ============================================================
+
+      - name: "🔑 Generate Checksums & Compatibility Report"
+        shell: bash
         env:
           VARIANT_INPUT: ${{ inputs.variant }}
           BUILD_TYPE_INPUT: ${{ inputs.build_type }}
@@ -92,88 +220,286 @@ jobs:
           TREBLE_BRANCH_INPUT: ${{ inputs.treble_branch }}
           TARGET_MODEL_INPUT: ${{ inputs.target_model }}
         run: |
-          # BUG FIX: path must be absolute or relative to GITHUB_WORKSPACE
-          bash scripts/validate_gsi_output.sh \
-            "$GITHUB_WORKSPACE"/android_source/out_gsi/*.img.xz \
-            "$GITHUB_WORKSPACE"/android_source/out_gsi/*.img.gz
-          case "$VARIANT_INPUT" in
-            treble_arm64_*) ABI_PROFILE="arm64" ;;
-            treble_arm_*) ABI_PROFILE="arm" ;;
-            treble_a64_*) ABI_PROFILE="a64" ;;
-            *) echo "Unsupported ABI variant: $VARIANT_INPUT" >&2; exit 2 ;;
-          esac
-          BUILD_PROP=$(find "$GITHUB_WORKSPACE/android_source/out/target/product" \
-            -type f -name build.prop -print -quit 2>/dev/null || true)
-          bash scripts/check_gsi_compatibility.sh \
-            "$BUILD_PROP" \
-            "$TARGET_MODEL_INPUT" \
-            "$GITHUB_WORKSPACE/android_source/out_gsi/compatibility-report.txt" \
-            "$ABI_PROFILE"
-          cd "$GITHUB_WORKSPACE/android_source/out_gsi"
-          sha256sum *.img.xz *.img.gz > SHA256SUMS.txt
-          IMAGE_XZ=$(find . -maxdepth 1 -type f -name '*.img.xz' -print -quit)
-          RAW_IMAGE_BYTES=$(xz --robot --list "$IMAGE_XZ" | awk -F '\t' '$1 == "totals" { print $5 }')
-          RAW_IMAGE_SIZE=$(numfmt --to=iec-i --suffix=B "$RAW_IMAGE_BYTES")
-          cat > build-info.txt <<EOF
-          GSI build report
-          ================
-          Output variant: $VARIANT_INPUT
-          Build type: $BUILD_TYPE_INPUT
-          Manifest: $MANIFEST_URL_INPUT
-          Manifest branch: $MANIFEST_BRANCH_INPUT
-          Treble branch: $TREBLE_BRANCH_INPUT
-          Image mode: source-built
-          DSU signing: Community GSI; not signed with a Samsung/Google OEM key
-          Target ABI profile: $ABI_PROFILE
-          Target model: $TARGET_MODEL_INPUT
-          Compatibility preflight:
-          $(cat compatibility-report.txt)
-          Commit: $GITHUB_SHA
-          Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
-          Built at UTC: $(date -u +%Y-%m-%dT%H:%M:%SZ)
-          Raw image size: $RAW_IMAGE_SIZE ($RAW_IMAGE_BYTES bytes)
+          set -euo pipefail
 
-          Checksums:
-          $(cat SHA256SUMS.txt)
-          EOF
-          echo "RELEASE_TAG=src-v$(date +%Y.%m.%d-%H%M%S)-${GITHUB_RUN_ID}" >> $GITHUB_ENV
+          SOURCE_ROOT="$GITHUB_WORKSPACE/android_source"
+          OUT_DIR="$SOURCE_ROOT/out_gsi"
+
+          mkdir -p "$OUT_DIR"
+
+          # ----------------------------------------------------------
+          # Determine ABI profile
+          # ----------------------------------------------------------
+
+          case "$VARIANT_INPUT" in
+            treble_arm64_*)
+              ABI_PROFILE="arm64"
+              ;;
+            treble_arm_*)
+              ABI_PROFILE="arm"
+              ;;
+            treble_a64_*)
+              ABI_PROFILE="a64"
+              ;;
+            *)
+              echo "ERROR: Unsupported ABI variant: $VARIANT_INPUT"
+              echo "Expected treble_arm64_*, treble_arm_*, or treble_a64_*."
+              exit 2
+              ;;
+          esac
+
+          echo "ABI profile: $ABI_PROFILE"
+
+          # ----------------------------------------------------------
+          # Find build.prop
+          # ----------------------------------------------------------
+
+          BUILD_PROP=""
+
+          if [ -d "$SOURCE_ROOT/out/target/product" ]; then
+            BUILD_PROP=$(
+              find "$SOURCE_ROOT/out/target/product" \
+                -type f \
+                -name "build.prop" \
+                -print \
+                -quit 2>/dev/null || true
+            )
+          fi
+
+          if [ -z "$BUILD_PROP" ]; then
+            echo "WARNING: No build.prop found in source output."
+            echo "Creating compatibility report without build.prop validation."
+          else
+            echo "Using build.prop:"
+            echo "$BUILD_PROP"
+          fi
+
+          # ----------------------------------------------------------
+          # Validate GSI outputs
+          # ----------------------------------------------------------
+
+          IMAGE_ARGS=()
+
+          while IFS= read -r -d '' image; do
+            IMAGE_ARGS+=("$image")
+          done < <(
+            find "$OUT_DIR" \
+              -maxdepth 1 \
+              -type f \
+              \( -name '*.img.xz' -o -name '*.img.gz' \) \
+              -print0
+          )
+
+          if [ "${#IMAGE_ARGS[@]}" -eq 0 ]; then
+            echo "ERROR: No GSI image files found."
+            exit 1
+          fi
+
+          bash scripts/validate_gsi_output.sh \
+            "${IMAGE_ARGS[@]}"
+
+          # ----------------------------------------------------------
+          # Compatibility check
+          # ----------------------------------------------------------
+
+          COMPAT_REPORT="$OUT_DIR/compatibility-report.txt"
+
+          if [ -n "$BUILD_PROP" ]; then
+            bash scripts/check_gsi_compatibility.sh \
+              "$BUILD_PROP" \
+              "$TARGET_MODEL_INPUT" \
+              "$COMPAT_REPORT" \
+              "$ABI_PROFILE"
+          else
+            {
+              printf '%s\n' "GSI Compatibility Report"
+              printf '%s\n' "========================"
+              printf '%s\n' ""
+              printf '%s\n' "Status: UNKNOWN"
+              printf '%s\n' "Reason: build.prop was not found."
+              printf 'Target: %s\n' "$TARGET_MODEL_INPUT"
+              printf 'ABI: %s\n' "$ABI_PROFILE"
+            } > "$COMPAT_REPORT"
+          fi
+
+          # ----------------------------------------------------------
+          # Checksums
+          # ----------------------------------------------------------
+
+          cd "$OUT_DIR"
+
+          CHECKSUM_FILES=()
+
+          while IFS= read -r -d '' file; do
+            CHECKSUM_FILES+=("$file")
+          done < <(
+            find . \
+              -maxdepth 1 \
+              -type f \
+              \( -name '*.img.xz' -o -name '*.img.gz' \) \
+              -print0
+          )
+
+          if [ "${#CHECKSUM_FILES[@]}" -eq 0 ]; then
+            echo "ERROR: No images available for checksum generation."
+            exit 1
+          fi
+
+          sha256sum "${CHECKSUM_FILES[@]}" > SHA256SUMS.txt
+
+          # ----------------------------------------------------------
+          # Determine compressed image and raw size
+          # ----------------------------------------------------------
+
+          IMAGE_XZ=$(
+            find . \
+              -maxdepth 1 \
+              -type f \
+              -name '*.img.xz' \
+              -print \
+              -quit
+          )
+
+          RAW_IMAGE_BYTES="unknown"
+          RAW_IMAGE_SIZE="unknown"
+
+          if [ -n "$IMAGE_XZ" ]; then
+            RAW_IMAGE_BYTES=$(
+              xz --robot --list "$IMAGE_XZ" 2>/dev/null |
+                awk -F '\t' '$1 == "totals" { print $5 }' |
+                tail -n 1
+            )
+
+            if [ -n "$RAW_IMAGE_BYTES" ]; then
+              RAW_IMAGE_SIZE=$(
+                numfmt \
+                  --to=iec-i \
+                  --suffix=B \
+                  "$RAW_IMAGE_BYTES"
+              )
+            fi
+          fi
+
+          # ----------------------------------------------------------
+          # Generate build-info.txt WITHOUT heredoc
+          # ----------------------------------------------------------
+
+          {
+            printf '%s\n' "GSI build report"
+            printf '%s\n' "================"
+            printf 'Output variant: %s\n' "$VARIANT_INPUT"
+            printf 'Build type: %s\n' "$BUILD_TYPE_INPUT"
+            printf 'Manifest: %s\n' "$MANIFEST_URL_INPUT"
+            printf 'Manifest branch: %s\n' "$MANIFEST_BRANCH_INPUT"
+            printf 'Treble branch: %s\n' "$TREBLE_BRANCH_INPUT"
+            printf '%s\n' "Image mode: source-built"
+            printf '%s\n' "DSU signing: Community GSI; not signed with a Samsung/Google OEM key"
+            printf 'Target ABI profile: %s\n' "$ABI_PROFILE"
+            printf 'Target device/model: %s\n' "$TARGET_MODEL_INPUT"
+            printf '%s\n' ""
+            printf '%s\n' "Pixel 7 target identity:"
+            printf '%s\n' "Device: panther"
+            printf '%s\n' "Board: gs201"
+            printf '%s\n' "Platform: gs201"
+            printf '%s\n' "Model: Pixel 7"
+            printf '%s\n' ""
+            printf '%s\n' "Compatibility preflight:"
+            cat "$COMPAT_REPORT"
+            printf '%s\n' ""
+            printf 'Commit: %s\n' "$GITHUB_SHA"
+            printf 'Workflow run: %s\n' "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            printf 'Built at UTC: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            printf 'Raw image size: %s (%s bytes)\n' "$RAW_IMAGE_SIZE" "$RAW_IMAGE_BYTES"
+            printf '%s\n' ""
+            printf '%s\n' "Checksums:"
+            cat SHA256SUMS.txt
+          } > build-info.txt
+
+          # ----------------------------------------------------------
+          # Show generated metadata
+          # ----------------------------------------------------------
+
+          echo
+          echo "===== compatibility-report.txt ====="
+          cat compatibility-report.txt
+
+          echo
+          echo "===== build-info.txt ====="
+          cat build-info.txt
+
+          # ----------------------------------------------------------
+          # Release tag
+          # ----------------------------------------------------------
+
+          RELEASE_TAG="src-v$(date +%Y.%m.%d-%H%M%S)-${GITHUB_RUN_ID}"
+
+          echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
+
+      # ============================================================
+      # UPLOAD ARTIFACTS
+      # ============================================================
 
       - name: "📤 Upload GSI Artifacts"
         uses: actions/upload-artifact@v6
         with:
-          name: ${{ github.event.inputs.variant }}
+          name: "${{ inputs.variant }}-panther"
           path: |
             ${{ github.workspace }}/android_source/out_gsi/*.img.xz
             ${{ github.workspace }}/android_source/out_gsi/*.img.gz
             ${{ github.workspace }}/android_source/out_gsi/SHA256SUMS.txt
             ${{ github.workspace }}/android_source/out_gsi/build-info.txt
             ${{ github.workspace }}/android_source/out_gsi/compatibility-report.txt
+          if-no-files-found: error
           retention-days: 7
+
+      # ============================================================
+      # GITHUB RELEASE
+      # ============================================================
 
       - name: "🏷️ Create GitHub Release"
         uses: softprops/action-gh-release@v3.0.3
-        # BUG FIX: Removed 'startsWith(github.ref, "refs/heads/")' condition
-        # which never fires on workflow_dispatch from the Actions UI.
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: "${{ github.event.inputs.variant }} Source GSI"
+          name: "${{ inputs.variant }} Pixel 7 Panther Source GSI"
           body: |
             ## 📱 Source-Built Treble GSI
-            - **Manifest**: `${{ github.event.inputs.manifest_url }}` (`${{ github.event.inputs.manifest_branch }}`)
-            - **Variant**: `${{ github.event.inputs.variant }}`
-            - **Build Type**: `${{ github.event.inputs.build_type }}`
-            - **Treble Layer**: TrebleDroid `${{ github.event.inputs.treble_branch }}`
-            - **DSU signing**: Community GSI; not signed with a Samsung/Google OEM key
-            - **Runner**: Ubuntu 24.04
-            - **Built on**: Run ${{ github.run_id }}
+
+            **Target device:** Google Pixel 7 (`panther`)
+
+            - **Device:** `panther`
+            - **Board:** `gs201`
+            - **Model:** `Pixel 7`
+            - **Manifest:** `${{ inputs.manifest_url }}`
+            - **Manifest branch:** `${{ inputs.manifest_branch }}`
+            - **Variant:** `${{ inputs.variant }}`
+            - **Build Type:** `${{ inputs.build_type }}`
+            - **Treble Layer:** TrebleDroid `${{ inputs.treble_branch }}`
+            - **Compatibility target:** `${{ inputs.target_model }}`
+            - **DSU signing:** Community GSI; not signed with a Samsung/Google OEM key
+            - **Runner:** Ubuntu 24.04
+            - **Built on:** Run ${{ github.run_id }}
+            - **Commit:** `${{ github.sha }}`
 
             ### ⚡ Flashing
+
             Use the generated `.img.xz` or `.img.gz` with the documented GSI
-            method for the target device. A generic GSI contains the system
-            userspace only; every device still needs its own compatible vendor,
-            kernel/boot, DTB, vbmeta, recovery, and installation procedure.
-            These images are not universal Odin packages and must not be flashed
-            with generic fastboot commands on devices that do not support it.
+            installation method for the target device.
+
+            This is a system-userspace GSI. The target device still requires
+            its compatible vendor implementation, kernel/boot image, DTB/DTBO,
+            vbmeta configuration, recovery/fastboot environment, and installation
+            procedure.
+
+            This image is **not** a universal Odin package and should not be
+            flashed using generic fastboot commands on devices that do not
+            support that installation method.
+
+            ### 🐾 Pixel 7 Target
+
+            This build workflow targets:
+
+            `Google Pixel 7 / panther / gs201`
+
           files: |
             ${{ github.workspace }}/android_source/out_gsi/*.img.xz
             ${{ github.workspace }}/android_source/out_gsi/*.img.gz
@@ -183,9 +509,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Sync release to Telegram
+      # ============================================================
+      # TELEGRAM
+      # ============================================================
+
+      - name: "📨 Sync Release to Telegram"
         if: success()
         continue-on-error: true
+        shell: bash
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -196,27 +527,84 @@ jobs:
           TELEGRAM_TREBLE_BRANCH: ${{ inputs.treble_branch }}
           TELEGRAM_TARGET_MODEL: ${{ inputs.target_model }}
         run: |
-          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+          set -euo pipefail
+
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
             echo "Telegram secrets are not configured; skipping notification."
             exit 0
           fi
+
           RELEASE_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/${RELEASE_TAG}"
+
           html_escape() {
-            sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'
+            sed \
+              -e 's/&/\&amp;/g' \
+              -e 's/</\&lt;/g' \
+              -e 's/>/\&gt;/g' \
+              -e 's/"/\&quot;/g'
           }
-          TELEGRAM_GSI_NAME_ESCAPED=$(printf '%s' "$TELEGRAM_GSI_NAME" | html_escape)
-          TELEGRAM_BUILD_TYPE_ESCAPED=$(printf '%s' "$TELEGRAM_BUILD_TYPE" | html_escape)
-          TELEGRAM_MANIFEST_BRANCH_ESCAPED=$(printf '%s' "$TELEGRAM_MANIFEST_BRANCH" | html_escape)
-          TELEGRAM_TREBLE_BRANCH_ESCAPED=$(printf '%s' "$TELEGRAM_TREBLE_BRANCH" | html_escape)
-          TELEGRAM_TARGET_MODEL_ESCAPED=$(printf '%s' "$TELEGRAM_TARGET_MODEL" | html_escape)
-          TELEGRAM_COMPATIBILITY=$(grep -m1 '^Status:' android_source/out_gsi/compatibility-report.txt | cut -d: -f2- | xargs | html_escape)
-          TELEGRAM_TEXT=$(printf '<b>%s Source GSI</b>\n<a href="%s">Open GitHub Release</a>\n\n<blockquote expandable><b>Build info</b>\nVariant: %s\nBuild type: %s\nManifest branch: %s\nTreble branch: %s\nTarget model: %s\nCompatibility: %s\nDSU signing: Community GSI; installer/device must accept community GSI signatures\nCommit: %s\n</blockquote>' \
-            "$TELEGRAM_GSI_NAME_ESCAPED" "$RELEASE_URL" "$TELEGRAM_GSI_NAME_ESCAPED" \
-            "$TELEGRAM_BUILD_TYPE_ESCAPED" "$TELEGRAM_MANIFEST_BRANCH_ESCAPED" \
-            "$TELEGRAM_TREBLE_BRANCH_ESCAPED" "$TELEGRAM_TARGET_MODEL_ESCAPED" \
-            "$TELEGRAM_COMPATIBILITY" "$GITHUB_SHA")
-          printf '%s' "$TELEGRAM_TEXT" > android_source/out_gsi/telegram-message.html
+
+          TELEGRAM_GSI_NAME_ESCAPED=$(
+            printf '%s' "$TELEGRAM_GSI_NAME" | html_escape
+          )
+
+          TELEGRAM_BUILD_TYPE_ESCAPED=$(
+            printf '%s' "$TELEGRAM_BUILD_TYPE" | html_escape
+          )
+
+          TELEGRAM_MANIFEST_BRANCH_ESCAPED=$(
+            printf '%s' "$TELEGRAM_MANIFEST_BRANCH" | html_escape
+          )
+
+          TELEGRAM_TREBLE_BRANCH_ESCAPED=$(
+            printf '%s' "$TELEGRAM_TREBLE_BRANCH" | html_escape
+          )
+
+          TELEGRAM_TARGET_MODEL_ESCAPED=$(
+            printf '%s' "$TELEGRAM_TARGET_MODEL" | html_escape
+          )
+
+          COMPATIBILITY_FILE="android_source/out_gsi/compatibility-report.txt"
+
+          TELEGRAM_COMPATIBILITY="UNKNOWN"
+
+          if [ -f "$COMPATIBILITY_FILE" ]; then
+            TELEGRAM_COMPATIBILITY=$(
+              grep -m1 '^Status:' "$COMPATIBILITY_FILE" |
+                cut -d: -f2- |
+                xargs 2>/dev/null |
+                html_escape || true
+            )
+
+            if [ -z "$TELEGRAM_COMPATIBILITY" ]; then
+              TELEGRAM_COMPATIBILITY="UNKNOWN"
+            fi
+          fi
+
+          TELEGRAM_TEXT=$(
+            printf \
+              '<b>%s Source GSI</b>\n<a href="%s">Open GitHub Release</a>\n\n<blockquote expandable><b>Build info</b>\nDevice: Pixel 7 (panther)\nBoard: gs201\nVariant: %s\nBuild type: %s\nManifest branch: %s\nTreble branch: %s\nTarget model: %s\nCompatibility: %s\nDSU signing: Community GSI; installer/device must accept community GSI signatures\nCommit: %s\n</blockquote>' \
+              "$TELEGRAM_GSI_NAME_ESCAPED" \
+              "$RELEASE_URL" \
+              "$TELEGRAM_GSI_NAME_ESCAPED" \
+              "$TELEGRAM_BUILD_TYPE_ESCAPED" \
+              "$TELEGRAM_MANIFEST_BRANCH_ESCAPED" \
+              "$TELEGRAM_TREBLE_BRANCH_ESCAPED" \
+              "$TELEGRAM_TARGET_MODEL_ESCAPED" \
+              "$TELEGRAM_COMPATIBILITY" \
+              "$GITHUB_SHA"
+          )
+
+          printf '%s' "$TELEGRAM_TEXT" \
+            > android_source/out_gsi/telegram-message.html
+
+          if [ ! -f "scripts/send_telegram_message.sh" ]; then
+            echo "Telegram helper script not found; skipping."
+            exit 0
+          fi
+
           bash scripts/send_telegram_message.sh \
             "$TELEGRAM_BOT_TOKEN" \
             "$TELEGRAM_CHAT_ID" \
             android_source/out_gsi/telegram-message.html
+```
