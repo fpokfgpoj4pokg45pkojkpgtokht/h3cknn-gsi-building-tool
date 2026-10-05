@@ -115,10 +115,6 @@ jobs:
 
     env:
 
-      # ==========================================================
-      # PIXEL 7 / PANTHER
-      # ==========================================================
-
       TARGET_BRAND: "google"
       TARGET_MANUFACTURER: "Google"
       TARGET_MODEL: "Pixel 7"
@@ -155,9 +151,8 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          chmod +x scripts/clean_disk.sh 2>/dev/null || true
-
-          if [ -x scripts/clean_disk.sh ]; then
+          if [ -f scripts/clean_disk.sh ]; then
+            chmod +x scripts/clean_disk.sh
             bash scripts/clean_disk.sh || true
           fi
 
@@ -235,12 +230,12 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          chmod +x scripts/*.sh 2>/dev/null || true
-
-          if [ ! -x scripts/port_rom.sh ]; then
+          if [ ! -f scripts/port_rom.sh ]; then
             echo "ERROR: scripts/port_rom.sh not found."
             exit 1
           fi
+
+          chmod +x scripts/port_rom.sh
 
           bash scripts/port_rom.sh \
             "$INPUT_ROM_URL" \
@@ -263,8 +258,7 @@ jobs:
           if [ ! -d "$ROOT" ]; then
             echo "ERROR: $ROOT does not exist."
             echo
-            echo "Workspace contents:"
-            find workspace -maxdepth 3 -print 2>/dev/null | head -500 || true
+            find workspace -maxdepth 4 -print 2>/dev/null | head -500 || true
             exit 1
           fi
 
@@ -273,7 +267,12 @@ jobs:
 
           echo
           echo "Top-level contents:"
-          find "$ROOT" -maxdepth 2 -mindepth 1 -print | sort | head -300
+          find "$ROOT" \
+            -maxdepth 2 \
+            -mindepth 1 \
+            -print \
+            | sort \
+            | head -300
 
 
       # ==========================================================
@@ -295,11 +294,7 @@ jobs:
             workspace/stock_pixel/index \
             workspace/stock_pixel/reports
 
-          echo
-          echo "============================================================"
-          echo "Google Pixel 7 Panther Factory Image"
-          echo "============================================================"
-
+          echo "Pixel factory:"
           echo "$FACTORY_URL"
 
           curl \
@@ -332,9 +327,12 @@ jobs:
           EXTRACT="workspace/stock_pixel/factory/extracted"
 
           rm -rf "$EXTRACT"
+
           mkdir -p "$EXTRACT"
 
-          unzip -o "$FACTORY" -d "$EXTRACT"
+          unzip -o \
+            "$FACTORY" \
+            -d "$EXTRACT"
 
           IMAGE_ZIP="$(
             find "$EXTRACT" \
@@ -366,10 +364,11 @@ jobs:
             exit 1
           fi
 
-          echo "Using:"
+          echo "Using image archive:"
           echo "$IMAGE_ZIP"
 
           rm -rf workspace/stock_pixel/images/nested
+
           mkdir -p workspace/stock_pixel/images/nested
 
           unzip -o \
@@ -397,6 +396,7 @@ jobs:
           FOUND_DIR="workspace/stock_pixel/images/found"
 
           rm -rf "$FOUND_DIR"
+
           mkdir -p "$FOUND_DIR"
 
           for PART in \
@@ -419,14 +419,18 @@ jobs:
             )"
 
             if [ -n "$FOUND" ]; then
+
               echo "FOUND $PART:"
               echo "$FOUND"
 
               cp \
                 "$FOUND" \
                 "$FOUND_DIR/${PART}.img"
+
             else
+
               echo "NOT FOUND: $PART"
+
             fi
 
           done
@@ -448,10 +452,10 @@ jobs:
           BASE="workspace/stock_pixel/partitions"
 
           rm -rf "$BASE"
+
           mkdir -p "$BASE"
 
-          cleanup()
-          {
+          cleanup() {
             set +e
 
             for PART in \
@@ -502,13 +506,19 @@ jobs:
             rm -f "$RAW"
 
             if file "$IMG" | grep -qi "Android sparse"; then
+
               echo "Converting sparse image..."
 
               simg2img \
                 "$IMG" \
                 "$RAW"
+
             else
-              cp "$IMG" "$RAW"
+
+              cp \
+                "$IMG" \
+                "$RAW"
+
             fi
 
             FSTYPE="$(
@@ -521,11 +531,13 @@ jobs:
             )"
 
             if [ -z "$FSTYPE" ]; then
+
               if file "$RAW" | grep -qi "EROFS"; then
                 FSTYPE="erofs"
               elif file "$RAW" | grep -qi "ext4"; then
                 FSTYPE="ext4"
               fi
+
             fi
 
             echo "Filesystem: ${FSTYPE:-unknown}"
@@ -533,14 +545,17 @@ jobs:
             case "$FSTYPE" in
 
               erofs)
+
                 echo "Extracting EROFS..."
 
                 fsck.erofs \
                   --extract="$DEST" \
                   "$RAW"
+
                 ;;
 
               ext4)
+
                 MNT="$BASE/$PART.mnt"
 
                 mkdir -p "$MNT"
@@ -557,22 +572,28 @@ jobs:
                   "$DEST"/
 
                 sudo umount "$MNT"
+
                 rmdir "$MNT"
+
                 ;;
 
               *)
+
                 echo "ERROR: Unsupported filesystem."
 
                 file "$RAW"
 
                 exit 1
+
                 ;;
+
             esac
 
             rm -f "$RAW"
 
             echo
             echo "$PART extracted file count:"
+
             find "$DEST" \
               -type f \
               | wc -l
@@ -612,12 +633,14 @@ jobs:
 
             [ -d "$ROOT" ] || continue
 
-            while IFS= read -r FILE; do
+            while IFS= read -r -d '' FILE; do
 
               REL="${FILE#$ROOT/}"
 
               SIZE="$(
-                stat -c '%s' "$FILE"
+                stat \
+                  -c '%s' \
+                  "$FILE"
               )"
 
               HASH="$(
@@ -643,12 +666,11 @@ jobs:
             done < <(
               find "$ROOT" \
                 -type f \
-                -print
+                -print0
             )
 
           done
 
-          echo
           echo "Indexed:"
           tail -n +2 "$INDEX" | wc -l
 
@@ -718,15 +740,13 @@ jobs:
 
             while IFS= read -r PROP; do
 
-              printf '%s\n' \
-                "============================================================" \
-                "$PART: $PROP" \
-                "============================================================" \
-                >> "$REPORT"
-
-              cat "$PROP" >> "$REPORT"
-
-              printf '\n' >> "$REPORT"
+              {
+                echo "============================================================"
+                echo "$PART: $PROP"
+                echo "============================================================"
+                cat "$PROP"
+                echo
+              } >> "$REPORT"
 
             done < <(
               find "$ROOT" \
@@ -745,7 +765,7 @@ jobs:
 
 
       # ==========================================================
-      # CREATE PATCH ENGINE WITHOUT HEREDOCS
+      # CREATE PATCH ENGINE
       # ==========================================================
 
       - name: "🧬 Create Panther Compatibility Engine"
@@ -755,10 +775,8 @@ jobs:
 
           mkdir -p scripts
 
-          python3 -c '
-          from pathlib import Path
-
-          script = r"""#!/usr/bin/env bash
+          cat > scripts/patch_hyperos_panther.sh <<'PATCH_ENGINE'
+          #!/usr/bin/env bash
 
           set -Eeuo pipefail
 
@@ -802,7 +820,6 @@ jobs:
               "$SYS/etc/permissions" \
               "$SYS/etc/sysconfig" \
               "$SYS/etc/vintf" \
-              "$SYS/etc/panther-stock" \
               "$SYS/etc/panther-stock/vendor" \
               "$SYS/etc/panther-stock/odm"
 
@@ -820,8 +837,7 @@ jobs:
               "$PROP" \
               "$PROP.hyperos-original"
 
-          remove_prop()
-          {
+          remove_prop() {
               local KEY="$1"
 
               sed -i \
@@ -831,8 +847,7 @@ jobs:
                   || true
           }
 
-          set_prop()
-          {
+          set_prop() {
               local KEY="$1"
               local VALUE="$2"
 
@@ -844,7 +859,7 @@ jobs:
                   >> "$PROP"
           }
 
-          echo "Removing conflicting product identity..."
+          echo "Removing conflicting identity..."
 
           for KEY in \
               ro.product.brand \
@@ -883,108 +898,113 @@ jobs:
           done
 
           # ======================================================
-          # REAL PIXEL 7 IDENTITY
+          # PIXEL 7 IDENTITY
           # ======================================================
 
-          set_prop ro.product.brand google
-          set_prop ro.product.manufacturer Google
-          set_prop ro.product.model Pixel\ 7
-          set_prop ro.product.device panther
-          set_prop ro.product.name panther
-          set_prop ro.product.board gs201
+          set_prop ro.product.brand "google"
+          set_prop ro.product.manufacturer "Google"
+          set_prop ro.product.model "Pixel 7"
+          set_prop ro.product.device "panther"
+          set_prop ro.product.name "panther"
+          set_prop ro.product.board "gs201"
 
-          set_prop ro.board.platform gs201
+          set_prop ro.board.platform "gs201"
 
-          set_prop ro.product.system.brand google
-          set_prop ro.product.system.manufacturer Google
-          set_prop ro.product.system.model Pixel\ 7
-          set_prop ro.product.system.device panther
-          set_prop ro.product.system.name panther
+          set_prop ro.product.system.brand "google"
+          set_prop ro.product.system.manufacturer "Google"
+          set_prop ro.product.system.model "Pixel 7"
+          set_prop ro.product.system.device "panther"
+          set_prop ro.product.system.name "panther"
 
-          set_prop ro.product.product.brand google
-          set_prop ro.product.product.manufacturer Google
-          set_prop ro.product.product.model Pixel\ 7
-          set_prop ro.product.product.device panther
-          set_prop ro.product.product.name panther
+          set_prop ro.product.product.brand "google"
+          set_prop ro.product.product.manufacturer "Google"
+          set_prop ro.product.product.model "Pixel 7"
+          set_prop ro.product.product.device "panther"
+          set_prop ro.product.product.name "panther"
 
-          set_prop ro.build.product panther
+          set_prop ro.build.product "panther"
 
           # ======================================================
           # ANDROID 16
           # ======================================================
 
-          set_prop ro.build.id BP2A.250605.031.A2
-          set_prop ro.build.display.id BP2A.250605.031.A2
-          set_prop ro.build.version.incremental 13578606
-          set_prop ro.build.version.release 16
-          set_prop ro.build.version.release_or_codename 16
-          set_prop ro.build.version.release_or_preview_display 16
-          set_prop ro.build.version.sdk 36
-          set_prop ro.build.version.codename REL
-          set_prop ro.build.version.preview_sdk 0
-          set_prop ro.build.version.preview_sdk_fingerprint REL
-          set_prop ro.build.version.security_patch 2025-06-05
-          set_prop ro.build.type user
-          set_prop ro.build.tags release-keys
-          set_prop ro.build.flavor panther-user
+          set_prop ro.build.id "BP2A.250605.031.A2"
+          set_prop ro.build.display.id "BP2A.250605.031.A2"
+          set_prop ro.build.version.incremental "13578606"
+          set_prop ro.build.version.release "16"
+          set_prop ro.build.version.release_or_codename "16"
+          set_prop ro.build.version.release_or_preview_display "16"
+          set_prop ro.build.version.sdk "36"
+          set_prop ro.build.version.codename "REL"
+          set_prop ro.build.version.preview_sdk "0"
+          set_prop ro.build.version.preview_sdk_fingerprint "REL"
+          set_prop ro.build.version.security_patch "2025-06-05"
+          set_prop ro.build.type "user"
+          set_prop ro.build.tags "release-keys"
+          set_prop ro.build.flavor "panther-user"
 
           # ======================================================
           # FINGERPRINT
           # ======================================================
 
-          set_prop ro.build.fingerprint google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys
-          set_prop ro.system.build.fingerprint google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys
-          set_prop ro.product.build.fingerprint google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys
+          set_prop \
+              ro.build.fingerprint \
+              "google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys"
 
-          set_prop ro.system.build.id BP2A.250605.031.A2
-          set_prop ro.system.build.version.release 16
-          set_prop ro.system.build.version.sdk 36
-          set_prop ro.system.build.version.security_patch 2025-06-05
+          set_prop \
+              ro.system.build.fingerprint \
+              "google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys"
+
+          set_prop \
+              ro.product.build.fingerprint \
+              "google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys"
+
+          set_prop ro.system.build.id "BP2A.250605.031.A2"
+          set_prop ro.system.build.version.release "16"
+          set_prop ro.system.build.version.sdk "36"
+          set_prop ro.system.build.version.security_patch "2025-06-05"
 
           # ======================================================
           # ARM64
           # ======================================================
 
-          set_prop ro.product.cpu.abi arm64-v8a
-          set_prop ro.product.cpu.abilist arm64-v8a,armeabi-v7a,armeabi
-          set_prop ro.product.cpu.abilist32 armeabi-v7a,armeabi
-          set_prop ro.product.cpu.abilist64 arm64-v8a
+          set_prop ro.product.cpu.abi "arm64-v8a"
+          set_prop ro.product.cpu.abilist "arm64-v8a,armeabi-v7a,armeabi"
+          set_prop ro.product.cpu.abilist32 "armeabi-v7a,armeabi"
+          set_prop ro.product.cpu.abilist64 "arm64-v8a"
 
           # ======================================================
           # TREBLE
           # ======================================================
 
-          set_prop ro.treble.enabled true
-          set_prop ro.actionable_compatible_property.enabled true
+          set_prop ro.treble.enabled "true"
+          set_prop ro.actionable_compatible_property.enabled "true"
 
-          # Do not force an arbitrary LL-NDK date into vendor compatibility.
           remove_prop ro.llndk.api_level
 
           # ======================================================
           # SECURITY
           # ======================================================
 
-          set_prop ro.secure 1
-          set_prop ro.adb.secure 1
-          set_prop ro.debuggable 0
-          set_prop ro.force.debuggable 0
+          set_prop ro.secure "1"
+          set_prop ro.adb.secure "1"
+          set_prop ro.debuggable "0"
+          set_prop ro.force.debuggable "0"
 
           # ======================================================
-          # GS201
+          # HARDWARE
           # ======================================================
 
-          set_prop ro.hardware gs201
-          set_prop ro.boot.hardware gs201
-          set_prop ro.boot.hardware.platform gs201
+          set_prop ro.hardware "gs201"
+          set_prop ro.boot.hardware "gs201"
+          set_prop ro.boot.hardware.platform "gs201"
 
           # ======================================================
           # GRAPHICS
           # ======================================================
 
-          set_prop ro.hardware.vulkan pixel
+          set_prop ro.hardware.vulkan "pixel"
 
-          # Keep these conservative. Do not force obsolete
-          # SurfaceFlinger behavior unless the source ROM requires it.
           remove_prop debug.sf.enable_hwc_vds
           remove_prop debug.sf.latch_unsignaled
           remove_prop debug.sf.disable_backpressure
@@ -994,45 +1014,40 @@ jobs:
           # ART
           # ======================================================
 
-          set_prop dalvik.vm.useartservice true
-          set_prop dalvik.vm.usejit true
+          set_prop dalvik.vm.useartservice "true"
+          set_prop dalvik.vm.usejit "true"
 
           # ======================================================
           # TELEPHONY
           # ======================================================
 
-          set_prop ro.telephony.default_network 26
-          set_prop persist.radio.multisim.config dsds
+          set_prop ro.telephony.default_network "26"
+          set_prop persist.radio.multisim.config "dsds"
+
+          set_prop ro.telephony.euicc "true"
+          set_prop persist.radio.euicc.enabled "true"
+          set_prop persist.radio.euicc "1"
 
           # ======================================================
-          # EUICC
+          # GOOGLE / KEYGUARD
           # ======================================================
 
-          set_prop ro.telephony.euicc true
-          set_prop persist.radio.euicc.enabled true
-          set_prop persist.radio.euicc 1
+          set_prop ro.keyguard.supported "true"
+          set_prop config.disableLockscreen "false"
+
+          set_prop ro.com.google.clientidbase "android-google"
+          set_prop ro.setupwizard.mode "OPTIONAL"
+          set_prop net.bt.name "Android"
+          set_prop ro.allow.mock.location "0"
 
           # ======================================================
-          # KEYGUARD / GOOGLE
+          # SAFE IMPORT HELPER
           # ======================================================
 
-          set_prop ro.keyguard.supported true
-          set_prop config.disableLockscreen false
-
-          set_prop ro.com.google.clientidbase android-google
-          set_prop ro.setupwizard.mode OPTIONAL
-          set_prop net.bt.name Android
-          set_prop ro.allow.mock.location 0
-
-          # ======================================================
-          # IMPORT HELPER
-          # ======================================================
-
-          import_file()
-          {
+          import_file() {
               local PART="$1"
               local REL="$2"
-              local MODE="$3"
+              local MODE="${3:-add}"
 
               local SRC="$STOCK/$PART/$REL"
               local DEST="$SYS/$REL"
@@ -1044,47 +1059,36 @@ jobs:
               if [ "$MODE" = "replace" ]; then
 
                   if [ -f "$DEST" ]; then
-                      cp "$DEST" "$DEST.hyperos-backup"
+                      cp -a "$DEST" "$DEST.hyperos-backup"
                   fi
 
                   cp -a "$SRC" "$DEST"
 
-                  printf '%s\n' \
-                      "REPLACED $PART/$REL" \
-                      >> "$REPORT"
+                  echo "REPLACED $PART/$REL" >> "$REPORT"
 
               else
 
                   if [ ! -e "$DEST" ]; then
-
                       cp -a "$SRC" "$DEST"
-
-                      printf '%s\n' \
-                          "ADDED $PART/$REL" \
-                          >> "$REPORT"
-
+                      echo "ADDED $PART/$REL" >> "$REPORT"
                   else
-
-                      printf '%s\n' \
-                          "KEPT $REL" \
-                          >> "$REPORT"
-
+                      echo "KEPT $REL" >> "$REPORT"
                   fi
 
               fi
           }
 
           # ======================================================
-          # SAFE PIXEL CONFIG IMPORT
+          # FRAMEWORK CONFIG IMPORT
           # ======================================================
 
           if [ "$IMPORT_CONFIGS" = "1" ]; then
 
-              printf '%s\n' \
-                  "" \
-                  "PIXEL FRAMEWORK CONFIGURATION" \
-                  "=============================" \
-                  >> "$REPORT"
+              {
+                  echo
+                  echo "PIXEL FRAMEWORK CONFIGURATION"
+                  echo "============================="
+              } >> "$REPORT"
 
               for PART in system product system_ext; do
 
@@ -1092,16 +1096,15 @@ jobs:
 
                   [ -d "$SRC/etc" ] || continue
 
-                  while IFS= read -r FILE; do
+                  while IFS= read -r -d '' FILE; do
 
                       REL="${FILE#$SRC/}"
+                      BASE="$(basename "$FILE")"
 
-                      case "$(basename "$FILE")" in
-
+                      case "$BASE" in
                           *fingerprint*|*biometric*|*euicc*|*uicc*|*telephony*|*carrier*|*subscription*|*wifi*|*nfc*)
                               import_file "$PART" "$REL" add || true
                               ;;
-
                       esac
 
                   done < <(
@@ -1118,23 +1121,23 @@ jobs:
                               -o -iname '*wifi*' \
                               -o -iname '*nfc*' \
                           \) \
-                          -print
+                          -print0
                   )
 
               done
           fi
 
           # ======================================================
-          # SELECTIVE APK IMPORT
+          # SELECTIVE EUICC APK IMPORT
           # ======================================================
 
           if [ "$IMPORT_APKS" = "1" ]; then
 
-              printf '%s\n' \
-                  "" \
-                  "PIXEL APK CANDIDATES" \
-                  "====================" \
-                  >> "$REPORT"
+              {
+                  echo
+                  echo "PIXEL APK CANDIDATES"
+                  echo "==================="
+              } >> "$REPORT"
 
               for PART in system product system_ext; do
 
@@ -1142,11 +1145,12 @@ jobs:
 
                   [ -d "$SRC" ] || continue
 
-                  while IFS= read -r APK; do
+                  while IFS= read -r -d '' APK; do
 
                       BASE="$(basename "$APK")"
 
                       case "$BASE" in
+
                           *Euicc*|*EUICC*|*euicc*)
 
                               REL="${APK#$SRC/}"
@@ -1155,20 +1159,24 @@ jobs:
                               if [ ! -f "$DEST" ]; then
 
                                   mkdir -p "$(dirname "$DEST")"
-                                  cp -a "$APK" "$DEST"
 
-                                  printf '%s\n' \
-                                      "ADDED APK $PART/$REL" \
-                                      >> "$REPORT"
+                                  cp -a \
+                                      "$APK" \
+                                      "$DEST"
+
+                                  echo "ADDED APK $PART/$REL" >> "$REPORT"
+
                               fi
+
                               ;;
+
                       esac
 
                   done < <(
                       find "$SRC" \
                           -type f \
                           -name '*.apk' \
-                          -print
+                          -print0
                   )
 
               done
@@ -1178,13 +1186,8 @@ jobs:
           # HARDWARE XML
           # ======================================================
 
-          python3 -c '
-          from pathlib import Path
-
-          root = Path(r"""$SYS""")
-
-          files = {
-              root / "etc/permissions/panther-hardware.xml": """<?xml version="1.0" encoding="utf-8"?>
+          cat > "$SYS/etc/permissions/panther-hardware.xml" <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
           <permissions>
               <feature name="android.hardware.wifi" />
               <feature name="android.hardware.wifi.direct" />
@@ -1200,32 +1203,29 @@ jobs:
               <feature name="android.hardware.telephony.euicc" />
               <feature name="android.hardware.usb.host" />
           </permissions>
-          """,
+          XML
 
-              root / "etc/permissions/panther-biometric.xml": """<?xml version="1.0" encoding="utf-8"?>
+          cat > "$SYS/etc/permissions/panther-biometric.xml" <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
           <permissions>
               <feature name="android.hardware.fingerprint" />
           </permissions>
-          """,
+          XML
 
-              root / "etc/permissions/panther-euicc.xml": """<?xml version="1.0" encoding="utf-8"?>
+          cat > "$SYS/etc/permissions/panther-euicc.xml" <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
           <permissions>
               <feature name="android.hardware.telephony.euicc" />
           </permissions>
-          """,
+          XML
 
-              root / "etc/sysconfig/panther-keyguard.xml": """<?xml version="1.0" encoding="utf-8"?>
+          cat > "$SYS/etc/sysconfig/panther-keyguard.xml" <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
           <config>
               <allow-in-data-usage-save package="com.android.systemui" />
               <allow-in-power-save package="com.android.systemui" />
           </config>
-          """
-          }
-
-          for path, content in files.items():
-              path.parent.mkdir(parents=True, exist_ok=True)
-              path.write_text(content.lstrip(), encoding="utf-8")
-          '
+          XML
 
           # ======================================================
           # VENDOR / ODM REFERENCE
@@ -1233,11 +1233,11 @@ jobs:
 
           if [ "$VENDOR_REFERENCE" = "1" ]; then
 
-              printf '%s\n' \
-                  "" \
-                  "PIXEL VENDOR / ODM REFERENCE" \
-                  "============================" \
-                  >> "$REPORT"
+              {
+                  echo
+                  echo "PIXEL VENDOR / ODM REFERENCE"
+                  echo "============================"
+              } >> "$REPORT"
 
               for PART in vendor odm; do
 
@@ -1342,23 +1342,18 @@ jobs:
               || true
 
           # ======================================================
-          # DRIVER RESOLVER
+          # RUNTIME DRIVER RESOLVER
           # ======================================================
 
-          python3 -c '
-          from pathlib import Path
-
-          p = Path(r"""$SYS/bin/panther-driver-resolver""")
-
-          content = r"""#!/system/bin/sh
+          cat > "$SYS/bin/panther-driver-resolver" <<'RESOLVER'
+          #!/system/bin/sh
 
           TAG="PantherDriverResolver"
           LOG="/data/local/tmp/panther-driver-resolver.log"
 
           mkdir -p /data/local/tmp 2>/dev/null || true
 
-          logmsg()
-          {
+          logmsg() {
               echo "$*" >> "$LOG"
               log -t "$TAG" "$*" 2>/dev/null || true
           }
@@ -1373,8 +1368,7 @@ jobs:
           logmsg "Pixel 7 Panther compatibility resolver"
           logmsg "================================================"
 
-          wait_path()
-          {
+          wait_path() {
               TARGET="$1"
               TIMEOUT="$2"
               I=0
@@ -1388,6 +1382,7 @@ jobs:
 
                   sleep 1
                   I=$((I + 1))
+
               done
 
               logmsg "TIMEOUT $TARGET"
@@ -1401,23 +1396,7 @@ jobs:
           wait_path /vendor_dlkm 180 || true
           wait_path /odm_dlkm 180 || true
 
-          I=0
-
-          while [ "$I" -lt 180 ]; do
-
-              READY="$(getprop apex.all.ready 2>/dev/null || true)"
-
-              if [ "$READY" = "1" ] || [ "$READY" = "true" ]; then
-                  logmsg "APEX READY"
-                  break
-              fi
-
-              sleep 1
-              I=$((I + 1))
-          done
-
-          find_exact()
-          {
+          find_exact() {
               NAME="$1"
 
               for ROOT in \
@@ -1453,8 +1432,7 @@ jobs:
               return 1
           }
 
-          resolve()
-          {
+          resolve() {
               find_exact "$1" || true
           }
 
@@ -1526,25 +1504,17 @@ jobs:
           logmsg "Panther resolver finished."
 
           exit 0
-          """
-
-          p.parent.mkdir(parents=True, exist_ok=True)
-          p.write_text(content.lstrip(), encoding="utf-8")
-          '
+          RESOLVER
 
           chmod 0755 \
               "$SYS/bin/panther-driver-resolver"
 
           # ======================================================
-          # INIT FILE
+          # RESOLVER INIT
           # ======================================================
 
-          python3 -c '
-          from pathlib import Path
-
-          p = Path(r"""$SYS/etc/init/panther-driver-resolver.rc""")
-
-          content = """service panther-driver-resolver /system/bin/panther-driver-resolver
+          cat > "$SYS/etc/init/panther-driver-resolver.rc" <<'RC'
+          service panther-driver-resolver /system/bin/panther-driver-resolver
               class late_start
               user root
               group root system shell
@@ -1553,22 +1523,14 @@ jobs:
 
           on property:sys.boot_completed=1
               start panther-driver-resolver
-          """
-
-          p.parent.mkdir(parents=True, exist_ok=True)
-          p.write_text(content.lstrip(), encoding="utf-8")
-          '
+          RC
 
           # ======================================================
           # DRIVER MAP
           # ======================================================
 
-          python3 -c '
-          from pathlib import Path
-
-          p = Path(r"""$SYS/etc/panther-driver-map.txt""")
-
-          content = """Pixel 7 Panther Hardware Compatibility Map
+          cat > "$SYS/etc/panther-driver-map.txt" <<'MAP'
+          Pixel 7 Panther Hardware Compatibility Map
 
           SYSTEM
           /system
@@ -1621,11 +1583,7 @@ jobs:
 
           EUICC
           EuiccService
-          """
-
-          p.parent.mkdir(parents=True, exist_ok=True)
-          p.write_text(content.lstrip(), encoding="utf-8")
-          '
+          MAP
 
           # ======================================================
           # BOOT RESCUE
@@ -1633,338 +1591,304 @@ jobs:
 
           if [ "$ENABLE_BOOT_RESCUE" = "1" ]; then
 
-              python3 -c '
-              from pathlib import Path
+              cat > "$SYS/bin/panther-boot-rescue" <<'RESCUE'
+          #!/system/bin/sh
 
-              p = Path(r"""$SYS/bin/panther-boot-rescue""")
+          TAG="PantherBootRescue"
 
-              content = r"""#!/system/bin/sh
+          BASE="/metadata/panther-rescue"
 
-              TAG="PantherBootRescue"
+          if [ ! -d /metadata ] || [ ! -w /metadata ]; then
+              BASE="/data/panther-rescue"
+          fi
 
-              BASE="/metadata/panther-rescue"
+          mkdir -p "$BASE" 2>/dev/null || true
 
-              if [ ! -d /metadata ] || ! -w /metadata ]; then
-                  BASE="/data/panther-rescue"
+          LOG="$BASE/panther-boot-rescue.log"
+          STATE="$BASE/state"
+          ATTEMPTS="$BASE/attempts"
+
+          logmsg() {
+              echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"
+              log -t "$TAG" "$*" 2>/dev/null || true
+          }
+
+          get_attempts() {
+              if [ -f "$ATTEMPTS" ]; then
+                  cat "$ATTEMPTS"
+              else
+                  echo 0
               fi
+          }
 
-              if [ ! -d "$BASE" ] || [ ! -w "$BASE" ]; then
-                  BASE="/cache/panther-rescue"
-              fi
+          set_attempts() {
+              echo "$1" > "$ATTEMPTS"
+          }
 
-              mkdir -p "$BASE" 2>/dev/null || true
+          mkdir -p "$BASE/logs" 2>/dev/null || true
 
-              LOG="$BASE/panther-boot-rescue.log"
-              STATE="$BASE/state"
-              ATTEMPTS="$BASE/attempts"
+          MAX_REBOOTS="${BOOT_RESCUE_MAX_REBOOTS:-5}"
+          TIMEOUT="${BOOT_RESCUE_TIMEOUT:-180}"
 
-              logmsg()
-              {
-                  echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"
-                  log -t "$TAG" "$*" 2>/dev/null || true
-              }
+          logmsg "BOOT RESCUE ENGINE STARTED"
 
-              get_attempts()
-              {
-                  if [ -f "$ATTEMPTS" ]; then
-                      cat "$ATTEMPTS"
-                  else
-                      echo 0
-                  fi
-              }
+          echo "IN_PROGRESS" > "$STATE"
 
-              set_attempts()
-              {
-                  echo "$1" > "$ATTEMPTS"
-              }
+          I=0
 
-              logmsg "================================================"
-              logmsg "BOOT RESCUE ENGINE LAUNCHED"
-              logmsg "================================================"
+          while [ "$I" -lt "$TIMEOUT" ]; do
 
-              echo "IN_PROGRESS" > "$STATE"
+              BOOT="$(getprop sys.boot_completed 2>/dev/null || true)"
 
-              MAX_REBOOTS="${BOOT_RESCUE_MAX_REBOOTS:-5}"
-              TIMEOUT="${BOOT_RESCUE_TIMEOUT:-180}"
+              if [ "$BOOT" = "1" ]; then
 
-              I=0
+                  logmsg "BOOT COMPLETED"
 
-              while [ "$I" -lt "$TIMEOUT" ]; do
+                  echo "SUCCESS" > "$STATE"
 
-                  BOOT="$(getprop sys.boot_completed 2>/dev/null || true)"
-
-                  if [ "$BOOT" = "1" ]; then
-
-                      logmsg "BOOT COMPLETED"
-
-                      echo "SUCCESS" > "$STATE"
-                      set_attempts 0
-
-                      exit 0
-                  fi
-
-                  sleep 1
-
-                  I=$((I + 1))
-
-              done
-
-              logmsg "BOOT TIMEOUT AFTER ${TIMEOUT}s"
-
-              ATTEMPT="$(get_attempts)"
-
-              case "$ATTEMPT" in
-                  ''|*[!0-9]*)
-                      ATTEMPT=0
-                      ;;
-              esac
-
-              logmsg "Current rescue attempts: $ATTEMPT"
-
-              mkdir -p "$BASE/logs" 2>/dev/null || true
-
-              logcat -b all -d \
-                  > "$BASE/logs/logcat.txt" \
-                  2>&1 \
-                  || true
-
-              if [ -d /sys/fs/pstore ]; then
-                  cp -a \
-                      /sys/fs/pstore/. \
-                      "$BASE/logs/pstore/" \
-                      2>/dev/null \
-                      || true
-              fi
-
-              if [ -d /data/tombstones ]; then
-                  cp -a \
-                      /data/tombstones/. \
-                      "$BASE/logs/tombstones/" \
-                      2>/dev/null \
-                      || true
-              fi
-
-              LOGFILE="$BASE/logs/logcat.txt"
-
-              ACTION="none"
-
-              if grep -Eqi \
-                  "FATAL EXCEPTION.*system_server|Watchdog.*system_server" \
-                  "$LOGFILE" 2>/dev/null; then
-
-                  ACTION="clear_dex"
-
-                  logmsg "Detected system_server crash."
-
-              elif grep -Eqi \
-                  "FATAL EXCEPTION.*com.android.systemui|SystemUI.*crash" \
-                  "$LOGFILE" 2>/dev/null; then
-
-                  ACTION="clear_systemui"
-
-                  logmsg "Detected SystemUI crash."
-
-              elif grep -Eqi \
-                  "CANNOT LINK EXECUTABLE|dlopen failed" \
-                  "$LOGFILE" 2>/dev/null; then
-
-                  ACTION="linker_failure"
-
-                  logmsg "Detected linker failure."
-
-              elif grep -Eqi \
-                  "ClassNotFoundException|NoSuchMethodError|VerifyError" \
-                  "$LOGFILE" 2>/dev/null; then
-
-                  ACTION="dex_failure"
-
-                  logmsg "Detected framework/Dex failure."
-
-              elif grep -Eqi \
-                  "VINTF.*check failed|vintf.*FAIL" \
-                  "$LOGFILE" 2>/dev/null; then
-
-                  ACTION="vintf_failure"
-
-                  logmsg "Detected VINTF failure."
-
-              elif grep -Eqi \
-                  "apexd.*failed" \
-                  "$LOGFILE" 2>/dev/null; then
-
-                  ACTION="apex_failure"
-
-                  logmsg "Detected APEX failure."
-
-              elif grep -Eqi \
-                  "fs_mgr.*mount.*failed" \
-                  "$LOGFILE" 2>/dev/null; then
-
-                  ACTION="mount_failure"
-
-                  logmsg "Detected filesystem mount failure."
-
-              elif grep -Eqi \
-                  "PackageManager.*Parsing.*failed" \
-                  "$LOGFILE" 2>/dev/null; then
-
-                  ACTION="package_failure"
-
-                  logmsg "Detected package parsing failure."
-
-              elif grep -Eqi \
-                  "avc: denied" \
-                  "$LOGFILE" 2>/dev/null; then
-
-                  ACTION="selinux_denial"
-
-                  logmsg "Detected SELinux denial."
-
-              elif grep -Eqi \
-                  "dm-verity" \
-                  "$LOGFILE" 2>/dev/null; then
-
-                  ACTION="verity"
-
-                  logmsg "Detected dm-verity error."
-
-              fi
-
-              logmsg "Detected action: $ACTION"
-
-              case "$ACTION" in
-
-                  clear_dex)
-                      rm -rf \
-                          /data/dalvik-cache \
-                          /data/resource-cache \
-                          "$BASE/dalvik-cache" \
-                          2>/dev/null \
-                          || true
-                      ;;
-
-                  clear_systemui)
-                      rm -rf \
-                          /data/system/package_cache \
-                          /data/system_ce/0/cache \
-                          /data/user/0/com.android.systemui/cache \
-                          2>/dev/null \
-                          || true
-                      ;;
-
-                  dex_failure)
-                      rm -rf \
-                          /data/dalvik-cache \
-                          /data/resource-cache \
-                          2>/dev/null \
-                          || true
-                      ;;
-
-                  package_failure)
-                      rm -rf \
-                          /data/system/package_cache \
-                          /data/system/package-dex \
-                          2>/dev/null \
-                          || true
-                      ;;
-
-                  selinux_denial)
-                      restorecon -RF \
-                          /data \
-                          2>/dev/null \
-                          || true
-                      ;;
-
-                  linker_failure|vintf_failure|apex_failure|mount_failure|verity)
-                      logmsg "No destructive automatic repair for $ACTION."
-                      ;;
-
-                  *)
-                      logmsg "No known automatic repair."
-                      ;;
-
-              esac
-
-              ATTEMPT=$((ATTEMPT + 1))
-
-              set_attempts "$ATTEMPT"
-
-              if [ "$ATTEMPT" -ge "$MAX_REBOOTS" ]; then
-
-                  logmsg "Maximum rescue attempts reached."
-
-                  echo "SAFE_STOP" > "$STATE"
+                  set_attempts 0
 
                   exit 0
+
               fi
 
-              logmsg "Rescue repair completed."
+              sleep 1
 
-              echo "RESCUE_REBOOT" > "$STATE"
+              I=$((I + 1))
 
-              sync
+          done
 
-              reboot \
-                  userspace \
-                  2>/dev/null \
-                  || reboot \
+          logmsg "BOOT TIMEOUT AFTER ${TIMEOUT}s"
+
+          ATTEMPT="$(get_attempts)"
+
+          case "$ATTEMPT" in
+              ''|*[!0-9]*)
+                  ATTEMPT=0
+                  ;;
+          esac
+
+          logmsg "Current rescue attempts: $ATTEMPT"
+
+          LOGFILE="$BASE/logs/logcat.txt"
+
+          logcat -b all -d \
+              > "$LOGFILE" \
+              2>&1 \
+              || true
+
+          if [ -d /sys/fs/pstore ]; then
+
+              mkdir -p "$BASE/logs/pstore"
+
+              cp -a \
+                  /sys/fs/pstore/. \
+                  "$BASE/logs/pstore/" \
                   2>/dev/null \
                   || true
 
-              exit 0
-              """
+          fi
 
-              p.parent.mkdir(parents=True, exist_ok=True)
-              p.write_text(content.lstrip(), encoding="utf-8")
-              '
+          if [ -d /data/tombstones ]; then
+
+              mkdir -p "$BASE/logs/tombstones"
+
+              cp -a \
+                  /data/tombstones/. \
+                  "$BASE/logs/tombstones/" \
+                  2>/dev/null \
+                  || true
+
+          fi
+
+          ACTION="none"
+
+          if grep -Eqi \
+              "FATAL EXCEPTION.*system_server|Watchdog.*system_server" \
+              "$LOGFILE" \
+              2>/dev/null; then
+
+              ACTION="clear_dex"
+
+          elif grep -Eqi \
+              "FATAL EXCEPTION.*com.android.systemui|SystemUI.*crash" \
+              "$LOGFILE" \
+              2>/dev/null; then
+
+              ACTION="clear_systemui"
+
+          elif grep -Eqi \
+              "CANNOT LINK EXECUTABLE|dlopen failed" \
+              "$LOGFILE" \
+              2>/dev/null; then
+
+              ACTION="linker_failure"
+
+          elif grep -Eqi \
+              "ClassNotFoundException|NoSuchMethodError|VerifyError" \
+              "$LOGFILE" \
+              2>/dev/null; then
+
+              ACTION="dex_failure"
+
+          elif grep -Eqi \
+              "VINTF.*check failed|vintf.*FAIL" \
+              "$LOGFILE" \
+              2>/dev/null; then
+
+              ACTION="vintf_failure"
+
+          elif grep -Eqi \
+              "apexd.*failed" \
+              "$LOGFILE" \
+              2>/dev/null; then
+
+              ACTION="apex_failure"
+
+          elif grep -Eqi \
+              "fs_mgr.*mount.*failed" \
+              "$LOGFILE" \
+              2>/dev/null; then
+
+              ACTION="mount_failure"
+
+          elif grep -Eqi \
+              "PackageManager.*Parsing.*failed" \
+              "$LOGFILE" \
+              2>/dev/null; then
+
+              ACTION="package_failure"
+
+          elif grep -Eqi \
+              "avc: denied" \
+              "$LOGFILE" \
+              2>/dev/null; then
+
+              ACTION="selinux_denial"
+
+          elif grep -Eqi \
+              "dm-verity" \
+              "$LOGFILE" \
+              2>/dev/null; then
+
+              ACTION="verity"
+
+          fi
+
+          logmsg "Detected action: $ACTION"
+
+          case "$ACTION" in
+
+              clear_dex|dex_failure)
+
+                  rm -rf \
+                      /data/dalvik-cache \
+                      /data/resource-cache \
+                      2>/dev/null \
+                      || true
+
+                  ;;
+
+              clear_systemui)
+
+                  rm -rf \
+                      /data/system/package_cache \
+                      /data/system_ce/0/cache \
+                      /data/user/0/com.android.systemui/cache \
+                      2>/dev/null \
+                      || true
+
+                  ;;
+
+              package_failure)
+
+                  rm -rf \
+                      /data/system/package_cache \
+                      /data/system/package-dex \
+                      2>/dev/null \
+                      || true
+
+                  ;;
+
+              selinux_denial)
+
+                  restorecon -RF \
+                      /data \
+                      2>/dev/null \
+                      || true
+
+                  ;;
+
+              linker_failure|vintf_failure|apex_failure|mount_failure|verity)
+
+                  logmsg "No destructive automatic repair for $ACTION."
+
+                  ;;
+
+              *)
+
+                  logmsg "No automatic repair selected."
+
+                  ;;
+
+          esac
+
+          ATTEMPT=$((ATTEMPT + 1))
+
+          set_attempts "$ATTEMPT"
+
+          if [ "$ATTEMPT" -ge "$MAX_REBOOTS" ]; then
+
+              logmsg "Maximum rescue attempts reached."
+
+              echo "SAFE_STOP" > "$STATE"
+
+              exit 0
+
+          fi
+
+          echo "RESCUE_REBOOT" > "$STATE"
+
+          sync
+
+          reboot userspace 2>/dev/null \
+              || reboot 2>/dev/null \
+              || true
+
+          exit 0
+          RESCUE
 
               chmod 0755 \
                   "$SYS/bin/panther-boot-rescue"
 
-              python3 -c '
-              from pathlib import Path
+              cat > "$SYS/etc/init/panther-boot-rescue.rc" <<'RC'
+          service panther-boot-rescue /system/bin/panther-boot-rescue
+              class core
+              user root
+              group root system log shell
+              disabled
+              oneshot
 
-              p = Path(r"""$SYS/etc/init/panther-boot-rescue.rc""")
+          on early-init
+              start panther-boot-rescue
+          RC
 
-              content = """service panther-boot-rescue /system/bin/panther-boot-rescue
-                  class core
-                  user root
-                  group root system log shell
-                  disabled
-                  oneshot
-
-              on early-init
-                  start panther-boot-rescue
-              """
-
-              p.parent.mkdir(parents=True, exist_ok=True)
-              p.write_text(content.lstrip(), encoding="utf-8")
-              '
-
-              python3 -c '
-              from pathlib import Path
-
-              p = Path(r"""$SYS/etc/panther-boot-errors.db""")
-
-              content = """ID|PATTERN|ACTION|MAX
-              system_server_fatal|FATAL EXCEPTION.*system_server|clear_dex|2
-              systemui_fatal|FATAL EXCEPTION.*com.android.systemui|clear_systemui|2
-              linker_failure|CANNOT LINK EXECUTABLE|collect_only|2
-              linker_dlopen|dlopen failed|collect_only|2
-              dex_failure|VerifyError|clear_dex|2
-              class_failure|ClassNotFoundException|clear_dex|2
-              method_failure|NoSuchMethodError|clear_dex|2
-              vintf_failure|VINTF.*check failed|collect_only|1
-              apex_failure|apexd.*failed|collect_only|1
-              mount_failure|fs_mgr.*mount.*failed|collect_only|1
-              avc_denial|avc: denied|restorecon|2
-              package_failure|PackageManager.*Parsing.*failed|clear_package_cache|2
-              verity_error|dm-verity|collect_only|0
-              """
-
-              p.parent.mkdir(parents=True, exist_ok=True)
-              p.write_text(content.lstrip(), encoding="utf-8")
-              '
+              cat > "$SYS/etc/panther-boot-errors.db" <<'DB'
+          ID|PATTERN|ACTION|MAX
+          system_server_fatal|FATAL EXCEPTION.*system_server|clear_dex|2
+          systemui_fatal|FATAL EXCEPTION.*com.android.systemui|clear_systemui|2
+          linker_failure|CANNOT LINK EXECUTABLE|collect_only|2
+          linker_dlopen|dlopen failed|collect_only|2
+          dex_failure|VerifyError|clear_dex|2
+          class_failure|ClassNotFoundException|clear_dex|2
+          method_failure|NoSuchMethodError|clear_dex|2
+          vintf_failure|VINTF.*check failed|collect_only|1
+          apex_failure|apexd.*failed|collect_only|1
+          mount_failure|fs_mgr.*mount.*failed|collect_only|1
+          avc_denial|avc: denied|restorecon|2
+          package_failure|PackageManager.*Parsing.*failed|clear_package_cache|2
+          verity_error|dm-verity|collect_only|0
+          DB
 
           fi
 
@@ -1972,12 +1896,8 @@ jobs:
           # FINAL REPORT
           # ======================================================
 
-          python3 -c '
-          from pathlib import Path
-
-          p = Path(r"""$ROOT/panther-gsi-patch-report.txt""")
-
-          content = """HyperOS → Google Pixel 7 Panther
+          cat > "$ROOT/panther-gsi-patch-report.txt" <<REPORT
+          HyperOS → Google Pixel 7 Panther
           Compatibility Patch Report
           ================================================
 
@@ -2000,23 +1920,19 @@ jobs:
           Fingerprint:
           google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys
 
-          FACTORY SOURCE
+          PIXEL FACTORY
 
-          https://dl.google.com/dl/android/aosp/panther-bp2a.250605.031.a2-factory-53161cbb.zip
+          ${FACTORY_URL:-not-specified}
 
           IMPORTANT
 
-          Pixel vendor/ODM binaries are NOT blindly copied into /system.
+          Pixel vendor/ODM binaries are not blindly copied into /system.
 
           The factory image is used as a compatibility reference.
 
-          The device vendor/ODM stack remains responsible for the
-          actual Pixel 7 hardware implementation.
-
-          """
-
-          p.write_text(content, encoding="utf-8")
-          '
+          The actual Pixel 7 vendor/ODM implementation remains
+          responsible for the device hardware HAL stack.
+          REPORT
 
           echo
           echo "============================================================"
@@ -2028,10 +1944,16 @@ jobs:
 
           echo
           echo "Staged Pixel reference files:"
+
           find "$SYS/etc/panther-stock" \
               -type f \
               2>/dev/null \
               | wc -l
+          PATCH_ENGINE
+
+          chmod +x scripts/patch_hyperos_panther.sh
+
+          bash -n scripts/patch_hyperos_panther.sh
 
 
       # ==========================================================
@@ -2047,6 +1969,7 @@ jobs:
           ENABLE_BOOT_RESCUE: ${{ inputs.enable_boot_rescue && '1' || '0' }}
           BOOT_RESCUE_TIMEOUT: ${{ inputs.boot_rescue_timeout }}
           BOOT_RESCUE_MAX_REBOOTS: ${{ inputs.boot_rescue_max_reboots }}
+          FACTORY_URL: ${{ inputs.factory_url }}
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -2091,11 +2014,13 @@ jobs:
           )
 
           if [ "${{ inputs.enable_boot_rescue }}" = "true" ]; then
+
             REQUIRED+=(
               "$SYS/bin/panther-boot-rescue"
               "$SYS/etc/init/panther-boot-rescue.rc"
               "$SYS/etc/panther-boot-errors.db"
             )
+
           fi
 
           for FILE in "${REQUIRED[@]}"; do
@@ -2156,12 +2081,10 @@ jobs:
             awk '{print $1}'
           )"
 
-          # 1 GiB headroom.
           HEADROOM=$((1024 * 1024 * 1024))
 
           IMAGE_BYTES=$((CONTENT_BYTES + HEADROOM))
 
-          # Align to 4 MiB.
           IMAGE_BYTES=$(
             (
               IMAGE_BYTES + 4194303
@@ -2171,11 +2094,9 @@ jobs:
           echo "CONTENT_BYTES=$CONTENT_BYTES" >> "$GITHUB_ENV"
           echo "IMAGE_BYTES=$IMAGE_BYTES" >> "$GITHUB_ENV"
 
-          echo
           echo "Content:"
           numfmt --to=iec "$CONTENT_BYTES"
 
-          echo
           echo "Image:"
           numfmt --to=iec "$IMAGE_BYTES"
 
@@ -2212,11 +2133,6 @@ jobs:
             "$IMG.xz" \
             "$IMG.gz"
 
-          echo
-          echo "============================================================"
-          echo "BUILDING FINAL GSI"
-          echo "============================================================"
-
           echo "Source:"
           echo "$SOURCE"
 
@@ -2237,8 +2153,7 @@ jobs:
 
             TEMP_MOUNT="$(mktemp -d)"
 
-            cleanup()
-            {
+            cleanup() {
               set +e
 
               if mountpoint -q "$TEMP_MOUNT"; then
@@ -2289,39 +2204,20 @@ jobs:
 
           fi
 
-          # ======================================================
-          # VERIFY IMAGE BEFORE SPARSIFYING
-          # ======================================================
-
           file "$IMG"
 
           if [ "$FS_TYPE" = "ext4" ]; then
             sudo blkid "$IMG" || true
           fi
 
-          # ======================================================
-          # CREATE SPARSE COPY
-          # ======================================================
-
-          if command -v img2simg >/dev/null 2>&1; then
+          # Keep the raw image intact and make sparse separately.
+          if command -v img2simg >/dev/null 2>&1 && [ "$FS_TYPE" = "ext4" ]; then
 
             img2simg \
               "$IMG" \
               "$OUT/${OUTPUT_NAME}.sparse.img"
 
-            if [ -f "$OUT/${OUTPUT_NAME}.sparse.img" ]; then
-
-              mv \
-                "$OUT/${OUTPUT_NAME}.sparse.img" \
-                "$IMG"
-
-            fi
-
           fi
-
-          # ======================================================
-          # COMPRESS
-          # ======================================================
 
           xz \
             -T0 \
@@ -2353,12 +2249,12 @@ jobs:
           OUT="workspace/output"
           IMG="$OUT/${{ inputs.output_name }}.img"
 
+          test -f "$IMG"
+
           echo
           echo "============================================================"
           echo "FINAL IMAGE"
           echo "============================================================"
-
-          test -f "$IMG"
 
           ls -lh "$IMG"
 
@@ -2370,10 +2266,16 @@ jobs:
             "$IMG.xz" \
             "$IMG.gz"
 
+          if [ -f "$OUT/${{ inputs.output_name }}.sparse.img" ]; then
+            echo
+            echo "Sparse:"
+            ls -lh "$OUT/${{ inputs.output_name }}.sparse.img"
+            file "$OUT/${{ inputs.output_name }}.sparse.img"
+          fi
+
           echo
           echo "Target fingerprint:"
-          printf '%s\n' \
-            "google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys"
+          echo "google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys"
 
 
       # ==========================================================
@@ -2400,111 +2302,109 @@ jobs:
             *.img.gz \
             > SHA256SUMS.txt
 
-          RAW_BYTES="$(
-            stat \
-              -c '%s' \
-              "${OUTPUT_NAME}.img"
-          )"
+          if [ -f "${OUTPUT_NAME}.sparse.img" ]; then
+            sha256sum \
+              "${OUTPUT_NAME}.sparse.img" \
+              >> SHA256SUMS.txt
+          fi
 
-          XZ_BYTES="$(
-            stat \
-              -c '%s' \
-              "${OUTPUT_NAME}.img.xz"
-          )"
-
-          GZ_BYTES="$(
-            stat \
-              -c '%s' \
-              "${OUTPUT_NAME}.img.gz"
-          )"
-
-          python3 -c '
+          python3 - <<'PY'
           import os
           from pathlib import Path
           from datetime import datetime, timezone
 
-          out = Path("build-info.txt")
+          output_name = os.environ["OUTPUT_NAME"]
+          source = os.environ["SOURCE_ROM"]
+          factory = os.environ["FACTORY_URL"]
+          fs_type = os.environ["FS_TYPE"]
 
-          source = os.environ.get("SOURCE_ROM", "")
-          factory = os.environ.get("FACTORY_URL", "")
-          output_name = os.environ.get("OUTPUT_NAME", "")
-          fs_type = os.environ.get("FS_TYPE", "")
+          raw = Path(f"{output_name}.img")
+          xz = Path(f"{output_name}.img.xz")
+          gz = Path(f"{output_name}.img.gz")
+          sparse = Path(f"{output_name}.sparse.img")
 
-          raw_bytes = os.stat(f"{output_name}.img").st_size
-          xz_bytes = os.stat(f"{output_name}.img.xz").st_size
-          gz_bytes = os.stat(f"{output_name}.img.gz").st_size
+          lines = [
+              "HyperOS → Google Pixel 7 Panther",
+              "===============================================",
+              "",
+              "SOURCE ROM",
+              source,
+              "",
+              "PIXEL FACTORY",
+              factory,
+              "",
+              "TARGET",
+              "",
+              "Brand: google",
+              "Manufacturer: Google",
+              "Model: Pixel 7",
+              "Device: panther",
+              "Product: panther",
+              "Board: gs201",
+              "",
+              "ANDROID",
+              "",
+              "Version: 16",
+              "SDK: 36",
+              "Build ID: BP2A.250605.031.A2",
+              "Incremental: 13578606",
+              "Security Patch: 2025-06-05",
+              "",
+              "FINGERPRINT",
+              "",
+              "google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys",
+              "",
+              "PIXEL PARTITIONS",
+              "",
+              "system.img: analyzed",
+              "product.img: analyzed",
+              "system_ext.img: analyzed",
+              "vendor.img: analyzed / reference",
+              "vendor_dlkm.img: analyzed",
+              "odm.img: analyzed",
+              "odm_dlkm.img: analyzed",
+              "",
+              "COMPATIBILITY",
+              "",
+              "Pixel identity: enabled",
+              "Android 16: enabled",
+              "GS201: enabled",
+              "Treble: enabled",
+              "Pixel configuration: enabled",
+              "eUICC: enabled",
+              "Biometrics: enabled",
+              "Telephony: enabled",
+              "Vendor HAL index: enabled",
+              "Runtime resolver: enabled",
+              "",
+              "BOOT RESCUE",
+              "",
+              "Persistent rescue engine: enabled",
+              "",
+              "IMAGE",
+              "",
+              f"Filesystem: {fs_type}",
+              f"Raw image bytes: {raw.stat().st_size}",
+              f"XZ bytes: {xz.stat().st_size}",
+              f"GZIP bytes: {gz.stat().st_size}",
+          ]
 
-          text = f"""HyperOS → Google Pixel 7 Panther
-          ================================================
+          if sparse.exists():
+              lines.append(f"Sparse image bytes: {sparse.stat().st_size}")
 
-          SOURCE ROM
-          {source}
+          lines.extend([
+              "",
+              "GENERATED",
+              "",
+              datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "",
+          ])
 
-          PIXEL FACTORY
-          {factory}
-
-          TARGET
-
-          Brand: google
-          Manufacturer: Google
-          Model: Pixel 7
-          Device: panther
-          Product: panther
-          Board: gs201
-
-          ANDROID
-
-          Version: 16
-          SDK: 36
-          Build ID: BP2A.250605.031.A2
-          Incremental: 13578606
-          Security Patch: 2025-06-05
-
-          FINGERPRINT
-
-          google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys
-
-          PIXEL PARTITIONS
-
-          system.img: analyzed
-          product.img: analyzed
-          system_ext.img: analyzed
-          vendor.img: analyzed / reference
-          vendor_dlkm.img: analyzed
-          odm.img: analyzed
-          odm_dlkm.img: analyzed
-
-          COMPATIBILITY
-
-          Pixel identity: enabled
-          Android 16: enabled
-          GS201: enabled
-          Treble: enabled
-          Pixel configuration: enabled
-          eUICC: enabled
-          Biometrics: enabled
-          Telephony: enabled
-          Vendor HAL index: enabled
-          Runtime resolver: enabled
-
-          BOOT RESCUE
-
-          Persistent rescue engine: enabled
-
-          IMAGE
-
-          Filesystem: {fs_type}
-          Raw image bytes: {raw_bytes}
-          XZ bytes: {xz_bytes}
-          GZIP bytes: {gz_bytes}
-
-          GENERATED
-
-          {datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
-          """
-
-          out.write_text(text, encoding="utf-8")
-          '
+          Path("build-info.txt").write_text(
+              "\n".join(lines),
+              encoding="utf-8",
+          )
+          PY
 
           cp \
             ../system_root/panther-gsi-patch-report.txt \
@@ -2540,6 +2440,7 @@ jobs:
             2>/dev/null \
             || true
 
+
       # ==========================================================
       # GITHUB RELEASE
       # ==========================================================
@@ -2548,13 +2449,15 @@ jobs:
         uses: softprops/action-gh-release@v3.0.3
         with:
           tag_name: "v${{ github.run_number }}-${{ github.run_id }}"
-          name: "${{ inputs.output_name }} — Pixel 7 Panther"  
+          name: "${{ inputs.output_name }} — Pixel 7 Panther"
+          generate_release_notes: false
           files: |
             workspace/output/*.img
             workspace/output/*.img.xz
             workspace/output/*.img.gz
+            workspace/output/*.sparse.img
             workspace/output/SHA256SUMS.txt
-            workspace/output/build-info.txt 
+            workspace/output/build-info.txt
             workspace/output/panther-gsi-patch-report.txt
             workspace/output/panther-stock-import-report.txt
             workspace/output/stock-build-props.txt
@@ -2581,19 +2484,20 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || \
+             [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
             echo "Telegram secrets not configured."
             exit 0
           fi
 
-          python3 -c '
+          python3 - <<'PY'
           import os
           from pathlib import Path
 
           name = os.environ["OUTPUT_NAME"]
           release = os.environ["RELEASE_URL"]
 
-          text = """<b>{name}</b>
+          text = f"""<b>{name}</b>
 
 <b>HyperOS → Google Pixel 7 Panther</b>
 
@@ -2651,16 +2555,15 @@ eUICC: resolver
 Persistent boot-error rescue engine: enabled
 
 <a href="{release}">Open GitHub Release</a>
-""".format(
-              name=name,
-              release=release
-          )
+"""
 
-          Path("workspace/output/telegram-message.html").write_text(
+          Path(
+              "workspace/output/telegram-message.html"
+          ).write_text(
               text,
-              encoding="utf-8"
+              encoding="utf-8",
           )
-          '
+          PY
 
           if [ ! -x scripts/send_telegram_message.sh ]; then
             echo "Telegram helper not present; skipping Telegram upload."
@@ -2672,4 +2575,3 @@ Persistent boot-error rescue engine: enabled
             "$TELEGRAM_BOT_TOKEN" \
             "$TELEGRAM_CHAT_ID" \
             workspace/output/telegram-message.html
-
