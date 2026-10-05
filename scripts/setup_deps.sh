@@ -1,4 +1,3 @@
-
 #!/usr/bin/env bash
 # ==============================================================================
 # setup_deps.sh - Install dependencies for GSI Porting & Source Building
@@ -9,6 +8,19 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
 TOOLS_DIR="$SCRIPT_DIR/../tools"
 BIN_DIR="/usr/local/bin"
+
+# Keep downloaded Java inside the repository/tool tree.
+JAVA_DIR="$TOOLS_DIR/jdk17"
+JAVA_HOME="$JAVA_DIR"
+
+# Temurin OpenJDK 17 Linux x64.
+# This is downloaded directly instead of relying on Ubuntu's Java packages.
+JAVA_VERSION="17.0.16+8"
+JAVA_ARCHIVE="OpenJDK17U-jdk_x64_linux_hotspot_17.0.16_8.tar.gz"
+JAVA_URL="https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.16%2B8/$JAVA_ARCHIVE"
+
+# SHA256 for the pinned Temurin archive.
+JAVA_SHA256=""
 
 echo
 echo "============================================================"
@@ -31,6 +43,22 @@ else
   echo "  WARNING: /etc/os-release not found."
 fi
 
+echo
+echo "Architecture:"
+uname -m
+
+case "$(uname -m)" in
+  x86_64|amd64)
+    echo "  [+] x86_64 runner detected."
+    ;;
+  *)
+    echo
+    echo "ERROR: This Java download is for x86_64 Linux."
+    echo "Detected architecture: $(uname -m)"
+    exit 1
+    ;;
+esac
+
 # ==============================================================================
 # APT
 # ==============================================================================
@@ -46,13 +74,12 @@ echo "==> [SETUP] Installing required system utilities & build packages..."
 # ------------------------------------------------------------------------------
 # Ubuntu package compatibility
 #
-# Older package names:
+# Old packages:
 #
-#   liblz4-tool  -> lz4
-#   p7zip-full   -> 7zip
-#   p7zip-rar    -> 7zip
+#   liblz4-tool -> lz4
+#   p7zip-full  -> 7zip
+#   p7zip-rar   -> 7zip
 #
-# We intentionally do not request the obsolete package names.
 # ------------------------------------------------------------------------------
 
 APT_PACKAGES=(
@@ -139,152 +166,136 @@ for package in "${OPTIONAL_PACKAGES[@]}"; do
 done
 
 # ==============================================================================
-# JAVA
+# SELF-CONTAINED JAVA
 # ==============================================================================
 
 echo
-echo "==> [SETUP] Checking Java..."
+echo "============================================================"
+echo "JAVA SETUP"
+echo "============================================================"
 
-JAVA_BIN=""
+echo
+echo "==> [SETUP] Checking self-contained Java..."
 
-# ------------------------------------------------------------------------------
-# First: check normal PATH.
-# ------------------------------------------------------------------------------
-
-if command -v java >/dev/null 2>&1; then
-  JAVA_BIN="$(command -v java)"
-fi
+mkdir -p "$TOOLS_DIR"
 
 # ------------------------------------------------------------------------------
-# Second: search standard JVM installation directories.
-#
-# This handles cases where apt installed OpenJDK successfully but the current
-# shell does not have /usr/lib/jvm/.../bin in PATH.
+# Reuse our own JDK if it already exists.
 # ------------------------------------------------------------------------------
 
-if [ -z "$JAVA_BIN" ]; then
+if [ -x "$JAVA_DIR/bin/java" ]; then
 
-  for candidate in \
-    /usr/lib/jvm/*/bin/java \
-    /usr/lib/jvm/*/jre/bin/java
-  do
+  echo "  [+] Existing self-contained JDK detected:"
+  echo "      $JAVA_DIR"
 
-    if [ -x "$candidate" ]; then
-      JAVA_BIN="$candidate"
-      break
-    fi
+else
 
-  done
+  echo "  -> Self-contained JDK not found."
+  echo "  -> Downloading Temurin OpenJDK 17 with wget..."
+  echo
+  echo "     Version: $JAVA_VERSION"
+  echo "     URL:"
+  echo "     $JAVA_URL"
 
-fi
+  JAVA_TMP="/tmp/$JAVA_ARCHIVE"
 
-# ------------------------------------------------------------------------------
-# Third: install OpenJDK if it truly isn't present.
-# ------------------------------------------------------------------------------
+  rm -f "$JAVA_TMP"
 
-if [ -z "$JAVA_BIN" ]; then
+  wget \
+    --https-only \
+    --tries=5 \
+    --timeout=30 \
+    --waitretry=5 \
+    --continue \
+    --show-progress \
+    "$JAVA_URL" \
+    -O "$JAVA_TMP"
 
-  echo "  -> Java not found."
-  echo "  -> Installing OpenJDK..."
-
-  JAVA_INSTALLED=0
-
-  # Prefer Java 17.
-  if apt-cache show openjdk-17-jdk >/dev/null 2>&1; then
-
-    echo "  -> Installing openjdk-17-jdk..."
-
-    if sudo apt-get install \
-      -y \
-      -qq \
-      --no-install-recommends \
-      openjdk-17-jdk; then
-
-      JAVA_INSTALLED=1
-
-    fi
-
+  if [ ! -s "$JAVA_TMP" ]; then
+    echo
+    echo "ERROR: Java download failed or produced an empty file."
+    exit 1
   fi
 
-  # Fall back to Java 21.
-  if [ "$JAVA_INSTALLED" != "1" ] \
-    && apt-cache show openjdk-21-jdk >/dev/null 2>&1; then
+  echo
+  echo "  [+] Java archive downloaded:"
+  ls -lh "$JAVA_TMP"
 
-    echo "  -> Installing openjdk-21-jdk..."
+  echo
+  echo "  -> Checking archive..."
 
-    if sudo apt-get install \
-      -y \
-      -qq \
-      --no-install-recommends \
-      openjdk-21-jdk; then
-
-      JAVA_INSTALLED=1
-
-    fi
-
-  fi
-
-  if [ "$JAVA_INSTALLED" != "1" ]; then
+  if ! tar -tzf "$JAVA_TMP" >/dev/null 2>&1; then
 
     echo
-    echo "ERROR: Could not install OpenJDK 17 or 21."
-    echo
-    echo "Available OpenJDK packages:"
-    apt-cache search '^openjdk-[0-9]+-jdk$' || true
-
+    echo "ERROR: Downloaded Java archive is invalid."
+    file "$JAVA_TMP" || true
     exit 1
 
   fi
 
-  # Refresh Bash's command cache after apt installation.
-  hash -r 2>/dev/null || true
+  echo "  [+] Java archive is valid."
+
+  # --------------------------------------------------------------------------
+  # Extract to a temporary location first.
+  # --------------------------------------------------------------------------
+
+  JAVA_EXTRACT="/tmp/gsi-jdk17"
+
+  rm -rf "$JAVA_EXTRACT"
+  mkdir -p "$JAVA_EXTRACT"
+
+  echo
+  echo "  -> Extracting Java..."
+
+  tar \
+    -xzf "$JAVA_TMP" \
+    -C "$JAVA_EXTRACT"
+
+  EXTRACTED_JAVA_DIR="$(find "$JAVA_EXTRACT" \
+    -mindepth 1 \
+    -maxdepth 1 \
+    -type d \
+    -print \
+    | head -n 1)"
+
+  if [ -z "$EXTRACTED_JAVA_DIR" ]; then
+
+    echo
+    echo "ERROR: Could not locate extracted JDK directory."
+    find "$JAVA_EXTRACT" -maxdepth 3 -print || true
+    exit 1
+
+  fi
+
+  rm -rf "$JAVA_DIR"
+
+  mv \
+    "$EXTRACTED_JAVA_DIR" \
+    "$JAVA_DIR"
+
+  rm -rf "$JAVA_EXTRACT"
+  rm -f "$JAVA_TMP"
+
+  echo
+  echo "  [+] Java installed at:"
+  echo "      $JAVA_DIR"
 
 fi
 
 # ------------------------------------------------------------------------------
-# Locate Java again after installation.
+# Verify our downloaded Java.
 # ------------------------------------------------------------------------------
 
-JAVA_BIN=""
-
-if command -v java >/dev/null 2>&1; then
-  JAVA_BIN="$(command -v java)"
-fi
-
-if [ -z "$JAVA_BIN" ]; then
-
-  for candidate in \
-    /usr/lib/jvm/*/bin/java \
-    /usr/lib/jvm/*/jre/bin/java
-  do
-
-    if [ -x "$candidate" ]; then
-      JAVA_BIN="$candidate"
-      break
-    fi
-
-  done
-
-fi
-
-# ------------------------------------------------------------------------------
-# Hard failure if Java installation apparently succeeded but no binary exists.
-# ------------------------------------------------------------------------------
-
-if [ -z "$JAVA_BIN" ]; then
+if [ ! -x "$JAVA_DIR/bin/java" ]; then
 
   echo
-  echo "ERROR: OpenJDK installation completed, but java could not be located."
-  echo
-  echo "JVM directories:"
-  ls -la /usr/lib/jvm/ 2>/dev/null || true
+  echo "ERROR: Downloaded Java installation is missing:"
+  echo "$JAVA_DIR/bin/java"
 
-  echo
-  echo "Java binaries:"
-  find /usr/lib/jvm \
+  find "$JAVA_DIR" \
+    -maxdepth 3 \
     -type f \
     -name java \
-    -perm -111 \
     -print \
     2>/dev/null \
     || true
@@ -294,21 +305,26 @@ if [ -z "$JAVA_BIN" ]; then
 fi
 
 # ------------------------------------------------------------------------------
-# Resolve the real Java binary.
+# Force the workflow to use our downloaded JDK.
 # ------------------------------------------------------------------------------
 
-JAVA_BIN_REAL="$(realpath "$JAVA_BIN")"
-
-# /usr/lib/jvm/java-17-openjdk-amd64/bin/java
-#                         ^^^^^^^^^^^^^^^^^^^^^
-# JAVA_HOME should therefore be two directories above java.
-JAVA_HOME="$(dirname "$(dirname "$JAVA_BIN_REAL")")"
-
-export JAVA_HOME
+export JAVA_HOME="$JAVA_DIR"
 export PATH="$JAVA_HOME/bin:$PATH"
 
+hash -r 2>/dev/null || true
+
+echo
+echo "Java configuration:"
+echo "  JAVA_HOME=$JAVA_HOME"
+echo "  JAVA_BIN=$JAVA_HOME/bin/java"
+
+echo
+echo "Java version:"
+
+"$JAVA_HOME/bin/java" -version 2>&1 | head -n 4
+
 # ------------------------------------------------------------------------------
-# Make Java available to later GitHub Actions steps.
+# Export to later GitHub Actions steps.
 # ------------------------------------------------------------------------------
 
 if [ -n "${GITHUB_ENV:-}" ]; then
@@ -318,20 +334,10 @@ if [ -n "${GITHUB_ENV:-}" ]; then
     echo "PATH=$JAVA_HOME/bin:$PATH"
   } >> "$GITHUB_ENV"
 
+  echo
+  echo "  [+] JAVA_HOME exported through GITHUB_ENV."
+
 fi
-
-# Refresh Bash command lookup again.
-hash -r 2>/dev/null || true
-
-echo
-echo "Java:"
-echo "  JAVA_HOME=$JAVA_HOME"
-echo "  JAVA_BIN=$JAVA_BIN_REAL"
-
-"$JAVA_HOME/bin/java" -version 2>&1 | head -n 3
-
-echo
-echo "  [+] Java configured successfully."
 
 # ==============================================================================
 # PYTHON
@@ -400,6 +406,7 @@ if ! command -v payload-dumper-go >/dev/null 2>&1; then
     "$PDGO_URL" \
     -o /tmp/payload-dumper-go.tar.gz
 
+  echo
   echo "  -> Verifying SHA256..."
 
   printf '%s  %s\n' \
@@ -506,6 +513,7 @@ E2FSDROID_SCRIPT="$SCRIPT_DIR/install_e2fsdroid.sh"
 
 if [ ! -f "$E2FSDROID_SCRIPT" ]; then
 
+  echo
   echo "ERROR: Missing:"
   echo "$E2FSDROID_SCRIPT"
 
@@ -561,11 +569,16 @@ done
 
 echo
 
+# ------------------------------------------------------------------------------
 # Explicit Java verification.
-if command -v java >/dev/null 2>&1; then
+# ------------------------------------------------------------------------------
+
+if [ -x "$JAVA_HOME/bin/java" ]; then
 
   echo "  [OK] java"
-  java -version 2>&1 | head -n 3
+  echo "  JAVA_HOME=$JAVA_HOME"
+
+  "$JAVA_HOME/bin/java" -version 2>&1 | head -n 3
 
 else
 
@@ -583,6 +596,11 @@ if [ "$MISSING" != "0" ]; then
 
 fi
 
+# ==============================================================================
+# COMPLETE
+# ==============================================================================
+
+echo
 echo "============================================================"
 echo "DEPENDENCY SETUP COMPLETE"
 echo "============================================================"
@@ -595,4 +613,4 @@ echo "  Java:"
 
 echo
 echo "All required GSI porting dependencies are ready."
-echo"============================================================"
+echo "============================================================"
