@@ -2499,68 +2499,77 @@ jobs:
 
           text = f"""<b>{name}</b>
 
-<b>HyperOS → Google Pixel 7 Panther</b>
+          python3 - <<'PY'
+          from pathlib import Path
 
-Android: 16
-SDK: 36
+          release = (
+              f"{__import__('os').environ.get('GITHUB_SERVER_URL', 'https://github.com')}/"
+              f"{__import__('os').environ.get('GITHUB_REPOSITORY', '')}/"
+              f"releases/tag/v{__import__('os').environ.get('GITHUB_RUN_NUMBER', '')}-"
+              f"{__import__('os').environ.get('GITHUB_RUN_ID', '')}"
+          )
 
-Brand: google
-Manufacturer: Google
-Model: Pixel 7
-Device: panther
-Product: panther
-Board: gs201
+          lines = [
+              "<b>HyperOS → Google Pixel 7 Panther</b>",
+              "",
+              "Android: 16",
+              "SDK: 36",
+              "",
+              "Brand: google",
+              "Manufacturer: Google",
+              "Model: Pixel 7",
+              "Device: panther",
+              "Product: panther",
+              "Board: gs201",
+              "",
+              "Fingerprint:",
+              "<code>google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys</code>",
+              "",
+              "<b>Pixel Factory Reference</b>",
+              "",
+              "system.img: analyzed",
+              "product.img: analyzed",
+              "system_ext.img: analyzed",
+              "vendor.img: reference",
+              "vendor_dlkm.img: analyzed",
+              "odm.img: analyzed",
+              "odm_dlkm.img: analyzed",
+              "",
+              "<b>Compatibility</b>",
+              "",
+              "Pixel identity: enabled",
+              "GS201: enabled",
+              "Treble: enabled",
+              "ARM64: enabled",
+              "Pixel configs: enabled",
+              "VINTF: indexed",
+              "HALs: indexed",
+              "APEX: detected",
+              "",
+              "<b>Runtime Resolver</b>",
+              "",
+              "WiFi: resolver",
+              "Bluetooth: resolver",
+              "Camera: resolver",
+              "Audio: resolver",
+              "Sensors: resolver",
+              "Fingerprint: resolver",
+              "NFC: resolver",
+              "GNSS: resolver",
+              "USB: resolver",
+              "Radio: resolver",
+              "GPU: resolver",
+              "eUICC: resolver",
+              "",
+              "<b>Boot Rescue</b>",
+              "",
+              "Persistent boot-error rescue engine: enabled",
+              "",
+              f'<a href="{release}">Open GitHub Release</a>',
+          ]
 
-Fingerprint:
-<code>google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys</code>
-
-<b>Pixel Factory Reference</b>
-
-system.img: analyzed
-product.img: analyzed
-system_ext.img: analyzed
-vendor.img: reference
-vendor_dlkm.img: analyzed
-odm.img: analyzed
-odm_dlkm.img: analyzed
-
-<b>Compatibility</b>
-
-Pixel identity: enabled
-GS201: enabled
-Treble: enabled
-ARM64: enabled
-Pixel configs: enabled
-VINTF: indexed
-HALs: indexed
-APEX: detected
-
-<b>Runtime Resolver</b>
-
-WiFi: resolver
-Bluetooth: resolver
-Camera: resolver
-Audio: resolver
-Sensors: resolver
-Fingerprint: resolver
-NFC: resolver
-GNSS: resolver
-USB: resolver
-Radio: resolver
-GPU: resolver
-eUICC: resolver
-
-<b>Boot Rescue</b>
-
-Persistent boot-error rescue engine: enabled
-
-<a href="{release}">Open GitHub Release</a>
-"""
-
-          Path(
-              "workspace/output/telegram-message.html"
-          ).write_text(
-              text,
+          Path("workspace/output/telegram-message.html").write_text(
+              "\n".join(lines) + "\n",
               encoding="utf-8",
           )
           PY
