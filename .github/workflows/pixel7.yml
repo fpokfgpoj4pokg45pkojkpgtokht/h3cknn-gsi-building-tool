@@ -2554,17 +2554,17 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          python3 -c '
+          python3 -c "
           import os
-          import base64
           from pathlib import Path
 
-          output_name = os.environ["OUTPUT_NAME"]
-          rom_url = os.environ["ROM_URL"]
-          factory_url = os.environ["FACTORY_URL"]
-          fs_type = os.environ["FS_TYPE"]
+          output_name = os.environ['OUTPUT_NAME']
+          rom_url = os.environ['ROM_URL']
+          factory_url = os.environ['FACTORY_URL']
+          fs_type = os.environ['FS_TYPE']
 
-          text = """# HyperOS → Google Pixel 7 Panther
+          text = '''
+# HyperOS → Google Pixel 7 Panther
 
 ## Target
 
@@ -2584,7 +2584,7 @@ jobs:
 
 ## Fingerprint
 
-`google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys`
+\`google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys\`
 
 ## Source ROM
 
@@ -2621,11 +2621,11 @@ The workflow performs:
 
 Installed:
 
-`/system/bin/panther-driver-resolver`
+\`/system/bin/panther-driver-resolver\`
 
 Init:
 
-`/system/etc/init/panther-driver-resolver.rc`
+\`/system/etc/init/panther-driver-resolver.rc\`
 
 The resolver searches the device runtime stack for compatible:
 
@@ -2646,12 +2646,12 @@ The resolver searches the device runtime stack for compatible:
 
 Installed:
 
-`/system/bin/panther-boot-rescue`
+\`/system/bin/panther-boot-rescue\`
 
 The rescue engine:
 
 - records boot state
-- waits for `sys.boot_completed`
+- waits for \`sys.boot_completed\`
 - captures logcat after a timeout
 - captures pstore when available
 - checks tombstones
@@ -2662,7 +2662,7 @@ The rescue engine:
 
 ## Important Architecture Note
 
-Pixel vendor/ODM binaries are **not blindly copied into `/system`**.
+Pixel vendor/ODM binaries are **not blindly copied into \`/system\`**.
 
 The Pixel factory package is used as a compatibility reference. The actual Pixel 7 vendor/ODM stack remains responsible for the hardware implementation.
 
@@ -2672,21 +2672,21 @@ This avoids blindly mixing incompatible vendor HALs, linker namespaces, VNDK lib
 
 Output:
 
-`{output_name}`
+\`{output_name}\`
 
 Android:
 
-`16`
+\`16\`
 
 Target:
 
-`Google Pixel 7 / Panther`
+\`Google Pixel 7 / Panther\`
 
 Filesystem:
 
-`{fs_type}`
+\`{fs_type}\`
 
-"""
+'''
 
           text = text.format(
               source=rom_url,
@@ -2695,12 +2695,11 @@ Filesystem:
               output_name=output_name
           )
 
-          Path("workspace/output/release-notes.md").write_text(
+          Path('workspace/output/release-notes.md').write_text(
               text,
-              encoding="utf-8"
+              encoding='utf-8'
           )
-          '
-
+          "
 
       # ==========================================================
       # ARTIFACT
