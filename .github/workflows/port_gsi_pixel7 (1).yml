@@ -1,4 +1,4 @@
-```yaml
+
 name: "🔧 Build HyperOS Treble GSI — Pixel 7 eSIM"
 
 on:
@@ -564,4 +564,3 @@ jobs:
           echo
           echo "Final image:"
           echo "$WORKSPACE/download/system.img"
-```
