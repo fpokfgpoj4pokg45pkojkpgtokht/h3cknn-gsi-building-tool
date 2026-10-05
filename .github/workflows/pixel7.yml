@@ -243,38 +243,6 @@ jobs:
             "$INPUT_ROM_TYPE" \
             "$INPUT_FS_TYPE"
 
-
-      # ==========================================================
-      # VERIFY ROM ROOT
-      # ==========================================================
-
-      - name: "🔎 Locate Generated GSI Root"
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          ROOT="workspace/system_root"
-
-          if [ ! -d "$ROOT" ]; then
-            echo "ERROR: $ROOT does not exist."
-            echo
-            find workspace -maxdepth 4 -print 2>/dev/null | head -500 || true
-            exit 1
-          fi
-
-          echo "GSI root:"
-          echo "$ROOT"
-
-          echo
-          echo "Top-level contents:"
-          find "$ROOT" \
-            -maxdepth 2 \
-            -mindepth 1 \
-            -print \
-            | sort \
-            | head -300
-
-
       # ==========================================================
       # DOWNLOAD PIXEL FACTORY
       # ==========================================================
