@@ -1,3 +1,4 @@
+```yaml
 name: "🔧 Port Treble GSI (HyperOS → Pixel 7 Panther)"
 
 on:
@@ -105,8 +106,6 @@ jobs:
 
     runs-on: self-hosted
 
-    # GitHub-hosted jobs cannot use 9999 minutes.
-    # 360 minutes is the supported maximum.
     timeout-minutes: 360
 
     concurrency:
@@ -115,6 +114,7 @@ jobs:
 
     permissions:
       contents: write
+      actions: read
 
     env:
 
@@ -143,25 +143,9 @@ jobs:
 
       - name: "📦 Checkout Repository"
         uses: actions/checkout@v5
-
-
-      # ==========================================================
-      # DISK CLEANUP
-      # ==========================================================
-
-      - name: "🧹 Maximize Runner Disk Space"
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          if [ -f scripts/clean_disk.sh ]; then
-            chmod +x scripts/clean_disk.sh
-            bash scripts/clean_disk.sh || true
-          fi
-
-          echo
-          echo "Available disk space:"
-          df -h
+        with:
+          clean: true
+          fetch-depth: 1
 
 
       # ==========================================================
@@ -204,14 +188,10 @@ jobs:
           echo "APT SOURCE REPAIR"
           echo "============================================================"
 
-          # Ubuntu 26.04 may use deb822 sources rather than the old
-          # /etc/apt/sources.list format. Enable Universe where possible.
-
           if command -v add-apt-repository >/dev/null 2>&1; then
             sudo add-apt-repository -y universe || true
           fi
 
-          # Make sure standard Ubuntu repositories are present.
           if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
             sudo cp \
               /etc/apt/sources.list.d/ubuntu.sources \
@@ -248,26 +228,15 @@ jobs:
 
           echo
           echo "============================================================"
-          echo "UBUNTU 26.04 PACKAGE MAPPING"
+          echo "UBUNTU PACKAGE MAPPING"
           echo "============================================================"
 
-          echo "liblz4-tool  -> lz4"
-          echo "p7zip         -> 7zip"
-          echo "p7zip-full    -> 7zip"
-          echo "p7zip-rar     -> 7zip"
-          echo "libxml2       -> libxml2-16"
+          echo "liblz4-tool -> lz4"
+          echo "p7zip -> 7zip"
+          echo "p7zip-full -> 7zip"
+          echo "p7zip-rar -> 7zip"
+          echo "libxml2 -> libxml2-16"
           echo
-
-          # ------------------------------------------------------
-          # Modern Ubuntu 26.04 package set.
-          #
-          # IMPORTANT:
-          # Do NOT add:
-          #   liblz4-tool
-          #   p7zip-rar
-          #
-          # They are obsolete/unavailable on Ubuntu 26.04.
-          # ------------------------------------------------------
 
           PACKAGES=(
             e2fsprogs
@@ -312,9 +281,6 @@ jobs:
             pigz
           )
 
-          # android-sdk-libsparse-utils is attempted separately because
-          # availability can vary between Ubuntu releases/repositories.
-
           echo
           echo "Installing standard dependencies..."
 
@@ -349,12 +315,6 @@ jobs:
 
           fi
 
-          # ------------------------------------------------------
-          # If Ubuntu does not provide the sparse package, try to
-          # locate the package through APT metadata rather than
-          # blindly installing an obsolete package.
-          # ------------------------------------------------------
-
           if ! command -v simg2img >/dev/null 2>&1; then
 
             echo "simg2img still missing."
@@ -371,7 +331,9 @@ jobs:
 
               echo "Candidate version: $CANDIDATE"
 
-              TMP_DEB="$RUNNER_TEMP/android-sdk-libsparse-utils.deb"
+              mkdir -p "${RUNNER_TEMP:-/tmp}/sparse-tools"
+
+              pushd "${RUNNER_TEMP:-/tmp}/sparse-tools" >/dev/null
 
               if apt-get download \
                 "android-sdk-libsparse-utils=${CANDIDATE}"; then
@@ -391,6 +353,8 @@ jobs:
                 fi
 
               fi
+
+              popd >/dev/null
 
             fi
 
@@ -490,9 +454,10 @@ jobs:
           rsync --version | head -n 1 || true
           python3 --version
           curl --version | head -n 1
+
           echo
           echo "============================================================"
-          echo "Tool versions"
+          echo "FINAL TOOL CHECK"
           echo "============================================================"
 
           simg2img --version || true
@@ -528,6 +493,7 @@ jobs:
             "$INPUT_OUTPUT_NAME" \
             "$INPUT_ROM_TYPE" \
             "$INPUT_FS_TYPE"
+
 
       # ==========================================================
       # VALIDATE PORT ENGINE OUTPUT
@@ -616,7 +582,7 @@ jobs:
           echo "PORT OUTPUT VALIDATION COMPLETE"
           echo "============================================================"
 
-          
+
       # ==========================================================
       # DOWNLOAD PIXEL FACTORY
       # ==========================================================
@@ -668,8 +634,6 @@ jobs:
           FACTORY="workspace/stock_pixel/factory/panther-factory.zip"
           EXTRACT="workspace/stock_pixel/factory/extracted"
 
-          rm -rf "$EXTRACT"
-
           mkdir -p "$EXTRACT"
 
           unzip -o \
@@ -709,8 +673,6 @@ jobs:
           echo "Using image archive:"
           echo "$IMAGE_ZIP"
 
-          rm -rf workspace/stock_pixel/images/nested
-
           mkdir -p workspace/stock_pixel/images/nested
 
           unzip -o \
@@ -736,8 +698,6 @@ jobs:
           set -Eeuo pipefail
 
           FOUND_DIR="workspace/stock_pixel/images/found"
-
-          rm -rf "$FOUND_DIR"
 
           mkdir -p "$FOUND_DIR"
 
@@ -792,8 +752,6 @@ jobs:
           set -Eeuo pipefail
 
           BASE="workspace/stock_pixel/partitions"
-
-          rm -rf "$BASE"
 
           mkdir -p "$BASE"
 
@@ -1239,10 +1197,6 @@ jobs:
               remove_prop "$KEY"
           done
 
-          # ======================================================
-          # PIXEL 7 IDENTITY
-          # ======================================================
-
           set_prop ro.product.brand "google"
           set_prop ro.product.manufacturer "Google"
           set_prop ro.product.model "Pixel 7"
@@ -1266,10 +1220,6 @@ jobs:
 
           set_prop ro.build.product "panther"
 
-          # ======================================================
-          # ANDROID 16
-          # ======================================================
-
           set_prop ro.build.id "BP2A.250605.031.A2"
           set_prop ro.build.display.id "BP2A.250605.031.A2"
           set_prop ro.build.version.incremental "13578606"
@@ -1284,10 +1234,6 @@ jobs:
           set_prop ro.build.type "user"
           set_prop ro.build.tags "release-keys"
           set_prop ro.build.flavor "panther-user"
-
-          # ======================================================
-          # FINGERPRINT
-          # ======================================================
 
           set_prop \
               ro.build.fingerprint \
@@ -1306,44 +1252,24 @@ jobs:
           set_prop ro.system.build.version.sdk "36"
           set_prop ro.system.build.version.security_patch "2025-06-05"
 
-          # ======================================================
-          # ARM64
-          # ======================================================
-
           set_prop ro.product.cpu.abi "arm64-v8a"
           set_prop ro.product.cpu.abilist "arm64-v8a,armeabi-v7a,armeabi"
           set_prop ro.product.cpu.abilist32 "armeabi-v7a,armeabi"
           set_prop ro.product.cpu.abilist64 "arm64-v8a"
-
-          # ======================================================
-          # TREBLE
-          # ======================================================
 
           set_prop ro.treble.enabled "true"
           set_prop ro.actionable_compatible_property.enabled "true"
 
           remove_prop ro.llndk.api_level
 
-          # ======================================================
-          # SECURITY
-          # ======================================================
-
           set_prop ro.secure "1"
           set_prop ro.adb.secure "1"
           set_prop ro.debuggable "0"
           set_prop ro.force.debuggable "0"
 
-          # ======================================================
-          # HARDWARE
-          # ======================================================
-
           set_prop ro.hardware "gs201"
           set_prop ro.boot.hardware "gs201"
           set_prop ro.boot.hardware.platform "gs201"
-
-          # ======================================================
-          # GRAPHICS
-          # ======================================================
 
           set_prop ro.hardware.vulkan "pixel"
 
@@ -1352,16 +1278,8 @@ jobs:
           remove_prop debug.sf.disable_backpressure
           remove_prop debug.sf.use_phase_offsets_as_durations
 
-          # ======================================================
-          # ART
-          # ======================================================
-
           set_prop dalvik.vm.useartservice "true"
           set_prop dalvik.vm.usejit "true"
-
-          # ======================================================
-          # TELEPHONY
-          # ======================================================
 
           set_prop ro.telephony.default_network "26"
           set_prop persist.radio.multisim.config "dsds"
@@ -1370,10 +1288,6 @@ jobs:
           set_prop persist.radio.euicc.enabled "true"
           set_prop persist.radio.euicc "1"
 
-          # ======================================================
-          # GOOGLE / KEYGUARD
-          # ======================================================
-
           set_prop ro.keyguard.supported "true"
           set_prop config.disableLockscreen "false"
 
@@ -1381,10 +1295,6 @@ jobs:
           set_prop ro.setupwizard.mode "OPTIONAL"
           set_prop net.bt.name "Android"
           set_prop ro.allow.mock.location "0"
-
-          # ======================================================
-          # SAFE IMPORT HELPER
-          # ======================================================
 
           import_file() {
               local PART="$1"
@@ -1419,10 +1329,6 @@ jobs:
 
               fi
           }
-
-          # ======================================================
-          # FRAMEWORK CONFIG IMPORT
-          # ======================================================
 
           if [ "$IMPORT_CONFIGS" = "1" ]; then
 
@@ -1468,10 +1374,6 @@ jobs:
 
               done
           fi
-
-          # ======================================================
-          # SELECTIVE EUICC APK IMPORT
-          # ======================================================
 
           if [ "$IMPORT_APKS" = "1" ]; then
 
@@ -1524,10 +1426,6 @@ jobs:
               done
           fi
 
-          # ======================================================
-          # HARDWARE XML
-          # ======================================================
-
           cat > "$SYS/etc/permissions/panther-hardware.xml" <<'XML'
           <?xml version="1.0" encoding="utf-8"?>
           <permissions>
@@ -1568,10 +1466,6 @@ jobs:
               <allow-in-power-save package="com.android.systemui" />
           </config>
           XML
-
-          # ======================================================
-          # VENDOR / ODM REFERENCE
-          # ======================================================
 
           if [ "$VENDOR_REFERENCE" = "1" ]; then
 
@@ -1667,10 +1561,6 @@ jobs:
 
           fi
 
-          # ======================================================
-          # SYSTEMUI INDEX
-          # ======================================================
-
           find "$ROOT" \
               -type f \
               \( \
@@ -1682,10 +1572,6 @@ jobs:
               > "$ROOT/panther-systemui-candidates.txt" \
               2>/dev/null \
               || true
-
-          # ======================================================
-          # RUNTIME DRIVER RESOLVER
-          # ======================================================
 
           cat > "$SYS/bin/panther-driver-resolver" <<'RESOLVER'
           #!/system/bin/sh
@@ -1851,10 +1737,6 @@ jobs:
           chmod 0755 \
               "$SYS/bin/panther-driver-resolver"
 
-          # ======================================================
-          # RESOLVER INIT
-          # ======================================================
-
           cat > "$SYS/etc/init/panther-driver-resolver.rc" <<'RC'
           service panther-driver-resolver /system/bin/panther-driver-resolver
               class late_start
@@ -1866,10 +1748,6 @@ jobs:
           on property:sys.boot_completed=1
               start panther-driver-resolver
           RC
-
-          # ======================================================
-          # DRIVER MAP
-          # ======================================================
 
           cat > "$SYS/etc/panther-driver-map.txt" <<'MAP'
           Pixel 7 Panther Hardware Compatibility Map
@@ -1926,10 +1804,6 @@ jobs:
           EUICC
           EuiccService
           MAP
-
-          # ======================================================
-          # BOOT RESCUE
-          # ======================================================
 
           if [ "$ENABLE_BOOT_RESCUE" = "1" ]; then
 
@@ -2233,10 +2107,6 @@ jobs:
           DB
 
           fi
-
-          # ======================================================
-          # FINAL REPORT
-          # ======================================================
 
           cat > "$ROOT/panther-gsi-patch-report.txt" <<REPORT
           HyperOS → Google Pixel 7 Panther
@@ -2638,10 +2508,6 @@ jobs:
           echo "Raw image:"
           ls -lh "$IMG"
 
-          # ------------------------------------------------------
-          # Sparse ext4 image
-          # ------------------------------------------------------
-
           if [ "$FS_TYPE" = "ext4" ] && \
              command -v img2simg >/dev/null 2>&1; then
 
@@ -2664,10 +2530,6 @@ jobs:
 
           fi
 
-          # ------------------------------------------------------
-          # XZ
-          # ------------------------------------------------------
-
           echo
           echo "Creating XZ..."
 
@@ -2678,10 +2540,6 @@ jobs:
             "$IMG" \
             > "$IMG.xz"
 
-          # ------------------------------------------------------
-          # GZIP
-          # ------------------------------------------------------
-
           echo
           echo "Creating GZIP..."
 
@@ -2690,10 +2548,6 @@ jobs:
             -c \
             "$IMG" \
             > "$IMG.gz"
-
-          # ------------------------------------------------------
-          # Final integrity checks
-          # ------------------------------------------------------
 
           test -s "$IMG"
           test -s "$IMG.xz"
@@ -2717,7 +2571,7 @@ jobs:
           if [ -f "$OUT/${OUTPUT_NAME}.sparse.img" ]; then
             file "$OUT/${OUTPUT_NAME}.sparse.img"
           fi
-           
+
 
       # ==========================================================
       # VALIDATE FINAL IMAGE
@@ -2763,6 +2617,7 @@ jobs:
       # ==========================================================
       # METADATA
       # ==========================================================
+
       - name: "🔑 Generate Checksums and Build Metadata"
         env:
           SOURCE_ROM: "${{ inputs.rom_url }}"
@@ -2940,7 +2795,12 @@ jobs:
             || true
 
 
+      # ==========================================================
+      # SUCCESS RELEASE
+      # ==========================================================
+
       - name: "🏷️ Create GitHub Release"
+        if: ${{ success() }}
         uses: softprops/action-gh-release@v3.0.3
         with:
           tag_name: "v${{ github.run_number }}-${{ github.run_id }}"
@@ -2963,12 +2823,163 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+
+      # ==========================================================
+      # PRESERVE EVERYTHING ON SUCCESS OR FAILURE
+      # ==========================================================
+
+      - name: "💾 Preserve All Downloaded Files and Build Data"
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set +e
+
+          echo "============================================================"
+          echo "PRESERVING ALL BUILD DATA"
+          echo "============================================================"
+
+          mkdir -p workspace/recovery
+
+          echo
+          echo "Runner:"
+          hostname
+          uname -a
+
+          echo
+          echo "Disk status:"
+          df -h
+
+          echo
+          echo "Workspace size:"
+          du -sh workspace 2>/dev/null || true
+
+          echo
+          echo "Repository size:"
+          du -sh . 2>/dev/null || true
+
+          echo
+          echo "Creating file manifest..."
+
+          find workspace \
+            -type f \
+            -printf '%p\t%s bytes\n' \
+            2>/dev/null \
+            | sort \
+            > workspace/recovery/workspace-files.txt
+
+          echo
+          echo "Creating SHA256 manifest for all manageable files..."
+
+          find workspace \
+            -type f \
+            -size -2G \
+            -print0 \
+            2>/dev/null |
+          xargs -0 -r sha256sum \
+            > workspace/recovery/workspace-sha256sums.txt \
+            2>/dev/null || true
+
+          echo
+          echo "Creating environment information..."
+
+          {
+            echo "Repository: $GITHUB_REPOSITORY"
+            echo "Run ID: $GITHUB_RUN_ID"
+            echo "Run Number: $GITHUB_RUN_NUMBER"
+            echo "Workflow: $GITHUB_WORKFLOW"
+            echo "Ref: $GITHUB_REF"
+            echo "SHA: $GITHUB_SHA"
+            echo
+            echo "Runner OS: $RUNNER_OS"
+            echo "Runner Architecture: $RUNNER_ARCH"
+            echo
+            echo "Target: Pixel 7 / Panther"
+            echo "Android: 16"
+            echo "SDK: 36"
+            echo "Build: BP2A.250605.031.A2"
+            echo "Fingerprint: google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys"
+          } > workspace/recovery/build-environment.txt
+
+          echo
+          echo "============================================================"
+          echo "RECOVERY CONTENTS"
+          echo "============================================================"
+
+          find workspace/recovery \
+            -maxdepth 2 \
+            -type f \
+            -print \
+            2>/dev/null \
+            | sort
+
+          echo
+          echo "IMPORTANT:"
+          echo "All files under workspace/ will be uploaded as a GitHub artifact."
+          echo "No cleanup script is being run."
+
+
+      # ==========================================================
+      # UPLOAD ENTIRE WORKSPACE
+      # ==========================================================
+
+      - name: "📦 Upload Complete Workspace Recovery Archive"
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: "HyperOS-Panther-Complete-Workspace-${{ github.run_number }}"
+          path: |
+            workspace/**
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 0
+          include-hidden-files: true
+
+
+      # ==========================================================
+      # UPLOAD TOOLS / SELF-DOWNLOADED JDK
+      # ==========================================================
+
+      - name: "☕ Preserve Downloaded Build Tools and JDK"
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: "HyperOS-Panther-Downloaded-Tools-${{ github.run_number }}"
+          path: |
+            tools/**
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 0
+          include-hidden-files: true
+
+
+      # ==========================================================
+      # UPLOAD FAILURE DIAGNOSTICS
+      # ==========================================================
+
+      - name: "🚨 Upload Failure Diagnostics"
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: "HyperOS-Panther-FAILURE-${{ github.run_number }}"
+          path: |
+            workspace/recovery/**
+            workspace/**/*.log
+            workspace/**/*.txt
+            workspace/**/*.tsv
+            workspace/**/*.json
+            workspace/**/*.xml
+          if-no-files-found: warn
+          retention-days: 30
+          compression-level: 0
+          include-hidden-files: true
+
+
       # ==========================================================
       # TELEGRAM
       # ==========================================================
 
       - name: "📨 Sync Release to Telegram"
-        if: success()
+        if: ${{ success() }}
         continue-on-error: true
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -3069,3 +3080,4 @@ jobs:
             "$TELEGRAM_BOT_TOKEN" \
             "$TELEGRAM_CHAT_ID" \
             workspace/output/telegram-message.html
+```
