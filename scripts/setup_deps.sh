@@ -1,4 +1,4 @@
-```bash
+
 #!/usr/bin/env bash
 # ==============================================================================
 # setup_deps.sh - Install dependencies for GSI Porting & Source Building
@@ -413,4 +413,3 @@ fi
 echo "============================================================"
 echo "DEPENDENCY SETUP COMPLETE"
 echo "============================================================"
-```
