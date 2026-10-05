@@ -2540,31 +2540,31 @@ jobs:
             2>/dev/null \
             || true
 
-
       # ==========================================================
       # RELEASE NOTES
       # ==========================================================
 
       - name: "📝 Generate Release Notes"
+        shell: bash
         env:
           OUTPUT_NAME: ${{ inputs.output_name }}
-          SOURCE_ROM: ${{ inputs.rom_url }}
+          ROM_URL: ${{ inputs.rom_url }}
           FACTORY_URL: ${{ inputs.factory_url }}
           FS_TYPE: ${{ inputs.fs_type }}
-        shell: bash
         run: |
           set -Eeuo pipefail
 
           python3 -c '
           import os
+          import base64
           from pathlib import Path
 
-          output = os.environ["OUTPUT_NAME"]
-          source = os.environ["SOURCE_ROM"]
-          factory = os.environ["FACTORY_URL"]
+          output_name = os.environ["OUTPUT_NAME"]
+          rom_url = os.environ["ROM_URL"]
+          factory_url = os.environ["FACTORY_URL"]
           fs_type = os.environ["FS_TYPE"]
 
-          text = f"""# HyperOS → Google Pixel 7 Panther
+          text = """# HyperOS → Google Pixel 7 Panther
 
 ## Target
 
@@ -2667,7 +2667,33 @@ Pixel vendor/ODM binaries are **not blindly copied into `/system`**.
 The Pixel factory package is used as a compatibility reference. The actual Pixel 7 vendor/ODM stack remains responsible for the hardware implementation.
 
 This avoids blindly mixing incompatible vendor HALs, linker namespaces, VNDK libraries, VINTF declarations and SELinux policy into the GSI.
+
+## Build
+
+Output:
+
+`{output_name}`
+
+Android:
+
+`16`
+
+Target:
+
+`Google Pixel 7 / Panther`
+
+Filesystem:
+
+`{fs_type}`
+
 """
+
+          text = text.format(
+              source=rom_url,
+              factory=factory_url,
+              fs_type=fs_type,
+              output_name=output_name
+          )
 
           Path("workspace/output/release-notes.md").write_text(
               text,
@@ -2744,8 +2770,7 @@ This avoids blindly mixing incompatible vendor HALs, linker namespaces, VNDK lib
         run: |
           set -Eeuo pipefail
 
-          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] ||
-             [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
             echo "Telegram secrets not configured."
             exit 0
           fi
@@ -2757,7 +2782,7 @@ This avoids blindly mixing incompatible vendor HALs, linker namespaces, VNDK lib
           name = os.environ["OUTPUT_NAME"]
           release = os.environ["RELEASE_URL"]
 
-          text = f"""<b>{name}</b>
+          text = """<b>{name}</b>
 
 <b>HyperOS → Google Pixel 7 Panther</b>
 
@@ -2768,12 +2793,13 @@ Brand: google
 Manufacturer: Google
 Model: Pixel 7
 Device: panther
+Product: panther
 Board: gs201
 
 Fingerprint:
 <code>google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys</code>
 
-<b>Pixel Factory</b>
+<b>Pixel Factory Reference</b>
 
 system.img: analyzed
 product.img: analyzed
@@ -2788,15 +2814,13 @@ odm_dlkm.img: analyzed
 Pixel identity: enabled
 GS201: enabled
 Treble: enabled
+ARM64: enabled
 Pixel configs: enabled
-eUICC: enabled
-Biometrics: enabled
-Telephony: enabled
 VINTF: indexed
 HALs: indexed
 APEX: detected
 
-<b>Runtime</b>
+<b>Runtime Resolver</b>
 
 WiFi: resolver
 Bluetooth: resolver
@@ -2816,7 +2840,10 @@ eUICC: resolver
 Persistent boot-error rescue engine: enabled
 
 <a href="{release}">Open GitHub Release</a>
-"""
+""".format(
+              name=name,
+              release=release
+          )
 
           Path("workspace/output/telegram-message.html").write_text(
               text,
@@ -2825,7 +2852,7 @@ Persistent boot-error rescue engine: enabled
           '
 
           if [ ! -x scripts/send_telegram_message.sh ]; then
-            echo "Telegram helper not present; skipping."
+            echo "Telegram helper not present; skipping Telegram upload."
             exit 0
           fi
 
@@ -2834,3 +2861,4 @@ Persistent boot-error rescue engine: enabled
             "$TELEGRAM_BOT_TOKEN" \
             "$TELEGRAM_CHAT_ID" \
             workspace/output/telegram-message.html
+
