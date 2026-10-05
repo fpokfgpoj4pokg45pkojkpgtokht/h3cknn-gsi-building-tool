@@ -7,6 +7,7 @@ on:
       rom_url:
         description: "📥 Direct HyperOS ROM URL"
         required: true
+        default: "https://drive.google.com/file/d/1_TKliD3OSpVKPiVByCgr-G9SFVwZ9C8n/view?usp=drivesdk"
         type: string
 
       output_name:
