@@ -1,566 +1,418 @@
-
-name: "🔧 Build HyperOS Treble GSI — Pixel 7 eSIM"
+name: "🔧 Build HyperOS Treble GSI + Pixel 7 eUICC"
 
 on:
   workflow_dispatch:
-    inputs:
-      system_image:
-        description: "HyperOS system.img path"
-        required: false
-        default: "/home/sal/_work/h3cknn-gsi-building-tool/h3cknn-gsi-building-tool/workspace/download/system.img"
-        type: string
-
-      output_name:
-        description: "Output GSI name"
-        required: false
-        default: "HyperOS-Android16-Pixel7-Treble"
-        type: string
-
-      enable_euicc:
-        description: "Enable Pixel eUICC/eSIM framework compatibility"
-        required: false
-        default: true
-        type: boolean
 
 jobs:
   build:
-    name: "📦 Build HyperOS Treble GSI"
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux, X64]
+
+    env:
+      WORKSPACE: /home/sal/_work/h3cknn-gsi-building-tool/h3cknn-gsi-building-tool/workspace
+      INPUT_IMG: /home/sal/_work/h3cknn-gsi-building-tool/h3cknn-gsi-building-tool/workspace/download/system.img
+      OUTPUT_DIR: /home/sal/_work/h3cknn-gsi-building-tool/h3cknn-gsi-building-tool/workspace/output
+      OUTPUT_IMG: /home/sal/_work/h3cknn-gsi-building-tool/h3cknn-gsi-building-tool/workspace/output/HyperOS-Treble-Pixel7-eSIM.img
 
     steps:
-
-      # ------------------------------------------------------------
-      # 1. Basic environment
-      # ------------------------------------------------------------
-      - name: "📁 Locate workspace"
+      - name: "📁 Prepare workspace"
         shell: bash
         run: |
-          set -eux
+          set -e
 
-          WORKSPACE="/home/sal/_work/h3cknn-gsi-building-tool/h3cknn-gsi-building-tool/workspace"
-          DOWNLOAD="$WORKSPACE/download"
-          SYSTEM="$DOWNLOAD/system.img"
-
-          echo "WORKSPACE=$WORKSPACE" >> "$GITHUB_ENV"
-          echo "DOWNLOAD=$DOWNLOAD" >> "$GITHUB_ENV"
-          echo "SYSTEM=$SYSTEM" >> "$GITHUB_ENV"
-
-          mkdir -p "$WORKSPACE"
-          mkdir -p "$DOWNLOAD"
+          mkdir -p "$OUTPUT_DIR"
+          mkdir -p "$WORKSPACE/tmp"
 
           echo "Workspace:"
-          ls -lah "$WORKSPACE"
+          echo "$WORKSPACE"
 
-          echo "Download directory:"
-          ls -lah "$DOWNLOAD"
+          echo "Input:"
+          echo "$INPUT_IMG"
 
-          test -f "$SYSTEM"
+          ls -lh "$INPUT_IMG"
+
+      - name: "🔍 Check required tools"
+        shell: bash
+        run: |
+          set -e
+
+          REQUIRED_TOOLS=(
+            file
+            mount
+            umount
+            rsync
+            e2fsck
+            resize2fs
+            mkfs.ext4
+            losetup
+            blkid
+          )
+
+          for tool in "${REQUIRED_TOOLS[@]}"; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              echo "::error::Missing required tool: $tool"
+              exit 1
+            fi
+          done
+
+          echo "All required tools are available."
+
+      - name: "🔍 Inspect original HyperOS system.img"
+        shell: bash
+        run: |
+          set -e
+
+          echo "===== FILE ====="
+          file "$INPUT_IMG"
 
           echo
-          echo "Found HyperOS system image:"
-          ls -lh "$SYSTEM"
+          echo "===== SIZE ====="
+          ls -lh "$INPUT_IMG"
 
-      # ------------------------------------------------------------
-      # 2. Install required host tools
-      # ------------------------------------------------------------
-      - name: "🛠️ Install image tools"
+          echo
+          echo "===== BLKID ====="
+          blkid "$INPUT_IMG" || true
+
+      - name: "📦 Convert sparse image if necessary"
         shell: bash
         run: |
-          set -eux
+          set -e
 
-          sudo apt-get update
+          mkdir -p "$WORKSPACE/tmp/original"
 
-          sudo apt-get install -y \
-            e2fsprogs \
-            erofs-utils \
-            lz4 \
-            xz-utils \
-            gzip \
-            unzip \
-            zip \
-            rsync \
-            file \
-            python3 \
-            python3-pip \
-            git \
-            mount \
-            util-linux \
-            android-sdk-libsparse-utils
+          if file "$INPUT_IMG" | grep -qi "Android sparse"; then
+            echo "Android sparse image detected."
 
-          command -v e2fsck
-          command -v resize2fs
-          command -v mkfs.ext4
-          command -v file
-
-      # ------------------------------------------------------------
-      # 3. Detect filesystem
-      # ------------------------------------------------------------
-      - name: "🔍 Detect HyperOS filesystem"
-        shell: bash
-        run: |
-          set -eux
-
-          file "$SYSTEM"
-
-          mkdir -p "$WORKSPACE/image_info"
-
-          file "$SYSTEM" > "$WORKSPACE/image_info/filesystem.txt"
-
-          if command -v dump.erofs >/dev/null 2>&1; then
-            dump.erofs "$SYSTEM" \
-              > "$WORKSPACE/image_info/erofs.txt" 2>&1 || true
-          fi
-
-          if command -v tune2fs >/dev/null 2>&1; then
-            tune2fs -l "$SYSTEM" \
-              > "$WORKSPACE/image_info/ext4.txt" 2>&1 || true
-          fi
-
-          cat "$WORKSPACE/image_info/filesystem.txt"
-
-      # ------------------------------------------------------------
-      # 4. Create working image
-      # ------------------------------------------------------------
-      - name: "📋 Prepare working system image"
-        shell: bash
-        run: |
-          set -eux
-
-          rm -rf "$WORKSPACE/treble_work"
-          mkdir -p "$WORKSPACE/treble_work"
-
-          cp --reflink=auto \
-            "$SYSTEM" \
-            "$WORKSPACE/treble_work/system-original.img"
-
-          cp --reflink=auto \
-            "$SYSTEM" \
-            "$WORKSPACE/treble_work/system.img"
-
-          chmod 0644 \
-            "$WORKSPACE/treble_work/system.img"
-
-          ls -lh "$WORKSPACE/treble_work/"
-
-      # ------------------------------------------------------------
-      # 5. Determine filesystem and mount it
-      # ------------------------------------------------------------
-      - name: "📂 Mount HyperOS system image"
-        shell: bash
-        run: |
-          set -eux
-
-          IMAGE="$WORKSPACE/treble_work/system.img"
-          ROOT="$WORKSPACE/treble_work/root"
-
-          mkdir -p "$ROOT"
-
-          FS="$(file -b "$IMAGE")"
-          echo "$FS"
-
-          if echo "$FS" | grep -qiE 'EROFS|erofs'; then
-            echo "EROFS detected."
-
-            mkdir -p "$WORKSPACE/treble_work/extracted"
-
-            if command -v fsck.erofs >/dev/null 2>&1; then
-              fsck.erofs \
-                --extract="$WORKSPACE/treble_work/extracted" \
-                "$IMAGE"
-            else
-              echo "ERROR: EROFS extraction support is unavailable."
+            if ! command -v simg2img >/dev/null 2>&1; then
+              echo "::error::simg2img is required for sparse Android images."
               exit 1
             fi
 
-            echo "EROFS extraction completed."
-
-          elif echo "$FS" | grep -qiE 'ext4|ext2|ext3'; then
-            echo "EXT filesystem detected."
-
-            sudo mount -o loop,rw \
-              "$IMAGE" \
-              "$ROOT"
-
-            echo "Mounted:"
-            mount | grep "$ROOT"
+            simg2img \
+              "$INPUT_IMG" \
+              "$WORKSPACE/tmp/original/system.raw.img"
 
           else
-            echo "ERROR: Unsupported system image filesystem:"
-            echo "$FS"
-            exit 1
+            echo "Image is already a raw filesystem image."
+
+            cp \
+              "$INPUT_IMG" \
+              "$WORKSPACE/tmp/original/system.raw.img"
           fi
 
-      # ------------------------------------------------------------
-      # 6. Create Treble compatibility configuration
-      # ------------------------------------------------------------
+          file "$WORKSPACE/tmp/original/system.raw.img"
+
+      - name: "🔧 Check original filesystem"
+        shell: bash
+        run: |
+          set -e
+
+          ORIGINAL="$WORKSPACE/tmp/original/system.raw.img"
+
+          echo "Checking filesystem..."
+
+          e2fsck -fy "$ORIGINAL" || true
+
+          blkid "$ORIGINAL" || true
+
+      - name: "💾 Create NEW system.img"
+        shell: bash
+        run: |
+          set -e
+
+          ORIGINAL="$WORKSPACE/tmp/original/system.raw.img"
+          NEW="$WORKSPACE/tmp/new-system.img"
+
+          ORIGINAL_SIZE=$(stat -c%s "$ORIGINAL")
+
+          # Add 768 MiB of working space so the new image has room
+          # for Treble/eUICC files and future modifications.
+          EXTRA=$((768 * 1024 * 1024))
+
+          NEW_SIZE=$((ORIGINAL_SIZE + EXTRA))
+
+          echo "Original size: $ORIGINAL_SIZE bytes"
+          echo "Extra space:   $EXTRA bytes"
+          echo "New size:      $NEW_SIZE bytes"
+
+          truncate -s "$NEW_SIZE" "$NEW"
+
+          echo "Formatting NEW image as ext4..."
+
+          mkfs.ext4 \
+            -F \
+            -L system \
+            "$NEW"
+
+          e2fsck -fy "$NEW"
+
+          echo "NEW system.img created:"
+          ls -lh "$NEW"
+
+      - name: "📂 Mount original system.img read-only"
+        shell: bash
+        run: |
+          set -e
+
+          ORIGINAL="$WORKSPACE/tmp/original/system.raw.img"
+          ORIGINAL_MOUNT="$WORKSPACE/tmp/original/mnt"
+
+          mkdir -p "$ORIGINAL_MOUNT"
+
+          sudo mount \
+            -o loop,ro \
+            "$ORIGINAL" \
+            "$ORIGINAL_MOUNT"
+
+          echo "Original image mounted READ-ONLY."
+
+          mount | grep "$ORIGINAL_MOUNT"
+
+      - name: "📂 Mount NEW system.img read-write"
+        shell: bash
+        run: |
+          set -e
+
+          NEW="$WORKSPACE/tmp/new-system.img"
+          NEW_MOUNT="$WORKSPACE/tmp/new"
+
+          mkdir -p "$NEW_MOUNT"
+
+          sudo mount \
+            -o loop,rw \
+            "$NEW" \
+            "$NEW_MOUNT"
+
+          echo "NEW image mounted READ-WRITE."
+
+          mount | grep "$NEW_MOUNT"
+
+      - name: "📋 Copy HyperOS system contents"
+        shell: bash
+        run: |
+          set -e
+
+          ORIGINAL_MOUNT="$WORKSPACE/tmp/original/mnt"
+          NEW_MOUNT="$WORKSPACE/tmp/new"
+
+          echo "Copying HyperOS system contents..."
+
+          sudo rsync \
+            -aHAX \
+            --numeric-ids \
+            --info=progress2 \
+            "$ORIGINAL_MOUNT"/ \
+            "$NEW_MOUNT"/
+
+          echo
+          echo "HyperOS contents copied."
+
+          echo
+          echo "NEW filesystem:"
+          sudo du -sh "$NEW_MOUNT"
+
       - name: "🧩 Add Treble configuration"
         shell: bash
         run: |
-          set -eux
+          set -e
 
-          if [ -d "$WORKSPACE/treble_work/extracted" ]; then
-            ROOT="$WORKSPACE/treble_work/extracted"
-          else
-            ROOT="$WORKSPACE/treble_work/root"
-          fi
+          NEW_MOUNT="$WORKSPACE/tmp/new"
 
-          mkdir -p "$ROOT/system/etc"
-          mkdir -p "$ROOT/system_ext/etc"
-          mkdir -p "$ROOT/product/etc"
+          sudo mkdir -p \
+            "$NEW_MOUNT/etc/permissions" \
+            "$NEW_MOUNT/etc/sysconfig" \
+            "$NEW_MOUNT/etc/vintf"
 
-          # Generic Treble properties.
-          cat > "$ROOT/system/etc/treble-hyperos.conf" <<'EOF'
-          # HyperOS Treble GSI
-          # Pixel 7 / panther
-          # Android 16
-
-          ro.treble.enabled=true
-          ro.vndk.lite=true
-
-          ro.product.first_api_level=31
-
-          ro.hardware.type=treble
-
-          persist.sys.phh.disable_expand=false
-          persist.sys.phh.disable_gestures=false
-          EOF
-
-          # Do not replace the device vendor.
-          # The Pixel vendor partition provides the hardware HALs.
-          cat > "$ROOT/system/etc/init/treble-hyperos.rc" <<'EOF'
-          on post-fs-data
-              setprop persist.sys.phh.disable_expand false
-
-          on boot
-              setprop ro.treble.enabled true
-          EOF
-
-          mkdir -p "$ROOT/system/etc/init"
-
-          echo "Treble configuration installed."
-
-      # ------------------------------------------------------------
-      # 7. Pixel 7 eUICC / eSIM framework configuration
-      # ------------------------------------------------------------
-      - name: "📡 Add Pixel 7 eUICC/eSIM compatibility"
-        if: ${{ inputs.enable_euicc }}
-        shell: bash
-        run: |
-          set -eux
-
-          if [ -d "$WORKSPACE/treble_work/extracted" ]; then
-            ROOT="$WORKSPACE/treble_work/extracted"
-          else
-            ROOT="$WORKSPACE/treble_work/root"
-          fi
-
-          mkdir -p "$ROOT/system/etc"
-
-          # Android framework configuration.
           #
-          # These properties advertise eUICC capability to the
-          # framework without replacing the Pixel vendor eSIM HAL.
-          cat > "$ROOT/system/etc/euicc-pixel7.conf" <<'EOF'
-          # Pixel 7 / panther eUICC compatibility
-          # Keep Google's stock vendor eUICC implementation.
+          # Generic Treble marker.
+          #
+          # This does NOT replace the actual vendor implementation.
+          # Pixel 7 vendor/odm/firmware remain untouched.
+          #
 
-          persist.radio.multisim.config=dsds
+          if [ ! -f "$NEW_MOUNT/etc/permissions/android.hardware.telephony.euicc.xml" ]; then
 
-          ro.telephony.euicc=true
-          persist.sys.euicc.enabled=true
-          EOF
+            sudo tee \
+              "$NEW_MOUNT/etc/permissions/android.hardware.telephony.euicc.xml" \
+              >/dev/null <<'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<permissions>
+    <feature name="android.hardware.telephony.euicc" />
+</permissions>
+EOF
 
-          # Permissions/configuration used by Android telephony.
-          mkdir -p "$ROOT/system/etc/permissions"
-
-          cat > "$ROOT/system/etc/permissions/hyperos-euicc.xml" <<'EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <permissions>
-
-              <feature name="android.hardware.telephony" />
-
-              <feature name="android.hardware.telephony.subscription" />
-
-              <feature name="android.hardware.telephony.euicc" />
-
-          </permissions>
-          EOF
-
-          # Carrier/eSIM framework hints.
-          mkdir -p "$ROOT/system/etc/sysconfig"
-
-          cat > "$ROOT/system/etc/sysconfig/hyperos-euicc.xml" <<'EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <config>
-
-              <allow-in-power-save package="com.android.euicc" />
-
-              <allow-in-data-usage-save package="com.android.euicc" />
-
-          </config>
-          EOF
-
-          echo "eUICC compatibility configuration installed."
-
-      # ------------------------------------------------------------
-      # 8. Preserve Google's Pixel eSIM packages if they already
-      #    exist in the HyperOS image.
-      # ------------------------------------------------------------
-      - name: "🔎 Check eUICC framework packages"
-        if: ${{ inputs.enable_euicc }}
-        shell: bash
-        run: |
-          set -eux
-
-          if [ -d "$WORKSPACE/treble_work/extracted" ]; then
-            ROOT="$WORKSPACE/treble_work/extracted"
-          else
-            ROOT="$WORKSPACE/treble_work/root"
           fi
 
-          echo "Searching for eUICC components..."
+          echo "Treble/eUICC permission configuration installed."
 
-          find "$ROOT" \
-            -type f \
-            \( \
-              -iname '*euicc*' \
-              -o -iname '*lpa*' \
-              -o -iname '*esim*' \
-            \) \
-            -print \
-            | sort \
-            > "$WORKSPACE/image_info/euicc-files.txt" || true
+      - name: "📡 Add Pixel 7 eUICC configuration"
+        shell: bash
+        run: |
+          set -e
 
-          cat "$WORKSPACE/image_info/euicc-files.txt" || true
+          NEW_MOUNT="$WORKSPACE/tmp/new"
+
+          sudo mkdir -p "$NEW_MOUNT/etc/sysconfig"
+
+          sudo tee \
+            "$NEW_MOUNT/etc/sysconfig/pixel7-euicc.xml" \
+            >/dev/null <<'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<config>
+
+    <!-- Pixel 7 eSIM / eUICC support -->
+
+    <allow-in-power-save package="com.android.phone" />
+
+    <allow-in-data-usage-save package="com.android.phone" />
+
+</config>
+EOF
+
+          echo "Pixel 7 eUICC sysconfig installed."
+
+      - name: "🔎 Inspect HyperOS eSIM stack"
+        shell: bash
+        run: |
+          set -e
+
+          NEW_MOUNT="$WORKSPACE/tmp/new"
+
+          echo "===== eUICC FILES ====="
+
+          sudo find "$NEW_MOUNT" \
+            -iname '*euicc*' \
+            -o -iname '*lpa*' \
+            | head -100 || true
 
           echo
-          echo "Android EuiccManager references:"
-          grep -R \
-            -i \
-            -E 'EuiccManager|EuiccService|euicc' \
-            "$ROOT/system/framework" \
+          echo "===== eUICC REFERENCES ====="
+
+          sudo grep -Ril \
+            -E 'EuiccService|euicc|embedded.?subscription' \
+            "$NEW_MOUNT/system" \
+            "$NEW_MOUNT/priv-app" \
+            "$NEW_MOUNT/app" \
             2>/dev/null \
-            | head -100 \
-            || true
+            | head -100 || true
 
-      # ------------------------------------------------------------
-      # 9. Add generic Treble VINTF compatibility directory
-      # ------------------------------------------------------------
-      - name: "🧬 Add Treble VINTF compatibility"
+      - name: "🔎 Verify important Treble directories"
         shell: bash
         run: |
-          set -eux
+          set -e
 
-          if [ -d "$WORKSPACE/treble_work/extracted" ]; then
-            ROOT="$WORKSPACE/treble_work/extracted"
-          else
-            ROOT="$WORKSPACE/treble_work/root"
-          fi
+          NEW_MOUNT="$WORKSPACE/tmp/new"
 
-          mkdir -p "$ROOT/system/etc/vintf"
+          echo "Checking system image..."
 
-          cat > "$ROOT/system/etc/vintf/manifest.xml" <<'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <manifest version="1.0" type="framework">
-              <!--
-                  Framework-side Treble manifest.
+          for path in \
+            bin \
+            etc \
+            framework \
+            lib \
+            lib64 \
+            priv-app \
+            app
+          do
+            if [ -d "$NEW_MOUNT/$path" ]; then
+              echo "[OK] /$path"
+            else
+              echo "[WARN] /$path missing"
+            fi
+          done
 
-                  Hardware implementations remain on the Pixel vendor
-                  partition. Do not declare fake HAL implementations here.
-              -->
-          </manifest>
-          EOF
-
-          echo "VINTF compatibility directory created."
-
-      # ------------------------------------------------------------
-      # 10. Set correct permissions
-      # ------------------------------------------------------------
-      - name: "🔐 Fix permissions"
+      - name: "💾 Sync filesystem"
         shell: bash
         run: |
-          set -eux
+          set -e
 
-          if [ -d "$WORKSPACE/treble_work/extracted" ]; then
-            ROOT="$WORKSPACE/treble_work/extracted"
-          else
-            ROOT="$WORKSPACE/treble_work/root"
-          fi
-
-          sudo chown -R root:root "$ROOT" || true
-
-          sudo find "$ROOT/system/etc" \
-            -type f \
-            -exec chmod 0644 {} \;
-
-          sudo find "$ROOT/system/etc/init" \
-            -type f \
-            -exec chmod 0644 {} \; \
-            2>/dev/null || true
-
-      # ------------------------------------------------------------
-      # 11. Unmount EXT4 image
-      # ------------------------------------------------------------
-      - name: "💾 Unmount modified image"
-        shell: bash
-        run: |
-          set -eux
-
-          ROOT="$WORKSPACE/treble_work/root"
-
-          if mountpoint -q "$ROOT"; then
-            sync
-            sudo umount "$ROOT"
-          fi
-
-      # ------------------------------------------------------------
-      # 12. Rebuild EXT4 image OR rebuild EROFS image
-      # ------------------------------------------------------------
-      - name: "🏗️ Rebuild Treble system.img"
-        shell: bash
-        run: |
-          set -eux
-
-          IMAGE="$WORKSPACE/treble_work/system.img"
-
-          if [ -d "$WORKSPACE/treble_work/extracted" ]; then
-            echo "Building EROFS image."
-
-            rm -f "$WORKSPACE/treble_work/system-new.img"
-
-            mkfs.erofs \
-              -zlz4hc \
-              "$WORKSPACE/treble_work/system-new.img" \
-              "$WORKSPACE/treble_work/extracted"
-
-            mv \
-              "$WORKSPACE/treble_work/system-new.img" \
-              "$IMAGE"
-
-          else
-            echo "EXT4 image was modified in-place."
-
-            sudo e2fsck -fy "$IMAGE" || true
-            sudo resize2fs -M "$IMAGE" || true
-          fi
-
-          file "$IMAGE"
-          ls -lh "$IMAGE"
-
-      # ------------------------------------------------------------
-      # 13. Basic Android image verification
-      # ------------------------------------------------------------
-      - name: "✅ Verify Treble GSI"
-        shell: bash
-        run: |
-          set -eux
-
-          IMAGE="$WORKSPACE/treble_work/system.img"
-
-          echo "Image:"
-          file "$IMAGE"
-
-          echo
-          echo "Size:"
-          stat -c '%n %s bytes' "$IMAGE"
-
-          echo
-          echo "SHA256:"
-          sha256sum "$IMAGE"
-
-          echo
-          echo "Treble configuration:"
-          if command -v debugfs >/dev/null 2>&1; then
-            printf 'cat /system/etc/treble-hyperos.conf\nquit\n' \
-              | debugfs "$IMAGE" \
-              2>/dev/null || true
-          fi
-
-      # ------------------------------------------------------------
-      # 14. Install final image at EXACT requested location
-      # ------------------------------------------------------------
-      - name: "📦 Install final HyperOS Treble GSI"
-        shell: bash
-        run: |
-          set -eux
-
-          FINAL="$WORKSPACE/download/system.img"
-          BUILT="$WORKSPACE/treble_work/system.img"
-
-          test -f "$BUILT"
-
-          cp --reflink=auto \
-            "$BUILT" \
-            "$FINAL"
-
-          chmod 0644 "$FINAL"
+          NEW_MOUNT="$WORKSPACE/tmp/new"
 
           sync
 
-          echo
-          echo "=========================================="
-          echo " FINAL HYPEROS TREBLE GSI"
-          echo "=========================================="
-          echo
-          echo "Path:"
-          echo "$FINAL"
-          echo
-          ls -lh "$FINAL"
-          echo
-          sha256sum "$FINAL"
+          sudo e2fsck -fy \
+            "$WORKSPACE/tmp/new-system.img" || true
 
-      # ------------------------------------------------------------
-      # 15. Generate build information
-      # ------------------------------------------------------------
-      - name: "📝 Generate build info"
+      - name: "⏏️ Unmount NEW system.img"
+        if: always()
         shell: bash
         run: |
-          set -eux
+          set +e
 
-          FINAL="$WORKSPACE/download/system.img"
-          INFO="$WORKSPACE/download/system-build-info.txt"
+          NEW_MOUNT="$WORKSPACE/tmp/new"
 
-          {
-            echo "HyperOS Treble GSI"
-            echo "=================="
-            echo
-            echo "Target: Pixel 7 / panther"
-            echo "Architecture: arm64"
-            echo "Android target: 16"
-            echo "eUICC framework patch: ${{ inputs.enable_euicc }}"
-            echo
-            echo "Input:"
-            echo "${{ inputs.system_image }}"
-            echo
-            echo "Output:"
-            echo "$FINAL"
-            echo
-            echo "Filesystem:"
-            file "$FINAL"
-            echo
-            echo "Size:"
-            stat -c '%s bytes' "$FINAL"
-            echo
-            echo "SHA256:"
-            sha256sum "$FINAL"
-            echo
-            echo "Important:"
-            echo "The Pixel vendor/vendor_boot/modem/eSIM HAL stack must remain stock."
-            echo "This workflow only modifies the system image."
-          } | tee "$INFO"
+          sync
 
-      # ------------------------------------------------------------
-      # 16. Do NOT flash anything
-      # ------------------------------------------------------------
-      - name: "🚫 No device flashing"
+          if mountpoint -q "$NEW_MOUNT"; then
+            sudo umount "$NEW_MOUNT"
+          fi
+
+      - name: "⏏️ Unmount original system.img"
+        if: always()
         shell: bash
         run: |
-          echo "Build complete."
+          set +e
+
+          ORIGINAL_MOUNT="$WORKSPACE/tmp/original/mnt"
+
+          if mountpoint -q "$ORIGINAL_MOUNT"; then
+            sudo umount "$ORIGINAL_MOUNT"
+          fi
+
+      - name: "🧪 Final filesystem check"
+        shell: bash
+        run: |
+          set -e
+
+          NEW="$WORKSPACE/tmp/new-system.img"
+
+          sudo e2fsck -fy "$NEW"
+
           echo
-          echo "No fastboot commands were executed."
-          echo "No vbmeta partitions were modified."
-          echo "No vendor partitions were modified."
-          echo "No boot/vendor_boot partitions were modified."
+          echo "===== FINAL IMAGE ====="
+
+          file "$NEW"
+          blkid "$NEW" || true
+          ls -lh "$NEW"
+
+      - name: "📦 Convert output to Android sparse image"
+        shell: bash
+        run: |
+          set -e
+
+          NEW="$WORKSPACE/tmp/new-system.img"
+          OUTPUT="$OUTPUT_IMG"
+
+          if ! command -v img2simg >/dev/null 2>&1; then
+            echo "::error::img2simg is required."
+            exit 1
+          fi
+
+          img2simg \
+            "$NEW" \
+            "$OUTPUT"
+
           echo
-          echo "Final image:"
-          echo "$WORKSPACE/download/system.img"
+          echo "Final GSI:"
+          ls -lh "$OUTPUT"
+
+          file "$OUTPUT"
+
+      - name: "🔎 Final validation"
+        shell: bash
+        run: |
+          set -e
+
+          test -f "$OUTPUT_IMG"
+
+          echo "======================================"
+          echo " HyperOS Treble GSI build complete"
+          echo "======================================"
+          echo
+          echo "Input:"
+          echo "$INPUT_IMG"
+          echo
+          echo "Output:"
+          echo "$OUTPUT_IMG"
+          echo
+          echo "Size:"
+          ls -lh "$OUTPUT_IMG"
