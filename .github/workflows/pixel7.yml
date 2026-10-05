@@ -164,48 +164,331 @@ jobs:
 
 
       # ==========================================================
-      # DEPENDENCIES
+      # UBUNTU 26.04 AMD64 DEPENDENCIES
       # ==========================================================
 
-      - name: "⚙️ Setup Build Dependencies"
+      - name: "⚙️ Setup Ubuntu 26.04 AMD64 Build Dependencies"
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          sudo apt-get update
+          echo "============================================================"
+          echo "Ubuntu / Architecture"
+          echo "============================================================"
+
+          . /etc/os-release
+
+          echo "OS: ${PRETTY_NAME:-unknown}"
+          echo "VERSION_ID: ${VERSION_ID:-unknown}"
+          echo "Architecture: $(dpkg --print-architecture)"
+          echo "Kernel: $(uname -a)"
+
+          if [ "${ID:-}" != "ubuntu" ]; then
+            echo "ERROR: This workflow requires Ubuntu."
+            exit 1
+          fi
+
+          if [ "$(dpkg --print-architecture)" != "amd64" ]; then
+            echo "ERROR: This workflow requires amd64."
+            exit 1
+          fi
+
+          if [ "${VERSION_ID:-}" != "26.04" ]; then
+            echo "WARNING: Runner is not Ubuntu 26.04."
+            echo "Continuing, but package availability may differ."
+          fi
+
+          echo
+          echo "============================================================"
+          echo "APT SOURCE REPAIR"
+          echo "============================================================"
+
+          # Ubuntu 26.04 may use deb822 sources rather than the old
+          # /etc/apt/sources.list format. Enable Universe where possible.
+
+          if command -v add-apt-repository >/dev/null 2>&1; then
+            sudo add-apt-repository -y universe || true
+          fi
+
+          # Make sure standard Ubuntu repositories are present.
+          if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+            sudo cp \
+              /etc/apt/sources.list.d/ubuntu.sources \
+              /etc/apt/sources.list.d/ubuntu.sources.github-backup \
+              || true
+          fi
+
+          echo
+          echo "APT source files:"
+          ls -la /etc/apt/sources.list.d/ || true
+
+          echo
+          echo "============================================================"
+          echo "APT UPDATE"
+          echo "============================================================"
+
+          for ATTEMPT in 1 2 3 4 5; do
+            echo "APT update attempt $ATTEMPT/5"
+
+            if sudo apt-get \
+              -o Acquire::Retries=5 \
+              -o DPkg::Lock::Timeout=120 \
+              update; then
+              break
+            fi
+
+            if [ "$ATTEMPT" -eq 5 ]; then
+              echo "ERROR: apt-get update failed."
+              exit 1
+            fi
+
+            sleep 5
+          done
+
+          echo
+          echo "============================================================"
+          echo "UBUNTU 26.04 PACKAGE MAPPING"
+          echo "============================================================"
+
+          echo "liblz4-tool  -> lz4"
+          echo "p7zip         -> 7zip"
+          echo "p7zip-full    -> 7zip"
+          echo "p7zip-rar     -> 7zip"
+          echo "libxml2       -> libxml2-16"
+          echo
+
+          # ------------------------------------------------------
+          # Modern Ubuntu 26.04 package set.
+          #
+          # IMPORTANT:
+          # Do NOT add:
+          #   liblz4-tool
+          #   p7zip-rar
+          #
+          # They are obsolete/unavailable on Ubuntu 26.04.
+          # ------------------------------------------------------
+
+          PACKAGES=(
+            e2fsprogs
+            erofs-utils
+            lz4
+            zstd
+            xz-utils
+            gzip
+            unzip
+            zip
+            7zip
+            cpio
+            rsync
+            file
+            jq
+            bc
+            python3
+            python3-pip
+            python3-venv
+            libxml2-utils
+            libxml2-16
+            xmlstarlet
+            lsof
+            psmisc
+            util-linux
+            mount
+            kmod
+            binutils
+            coreutils
+            grep
+            sed
+            gawk
+            curl
+            wget
+            ca-certificates
+            git
+            findutils
+            sudo
+            dosfstools
+            parted
+            numactl
+            pigz
+          )
+
+          # android-sdk-libsparse-utils is attempted separately because
+          # availability can vary between Ubuntu releases/repositories.
+
+          echo
+          echo "Installing standard dependencies..."
 
           sudo apt-get install -y \
-            android-sdk-libsparse-utils \
-            e2fsprogs \
-            erofs-utils \
-            lz4 \
-            zstd \
-            xz-utils \
-            gzip \
-            unzip \
-            zip \
-            cpio \
-            rsync \
-            file \
-            jq \
-            bc \
-            python3 \
-            python3-pip \
-            libxml2-utils \
-            xmlstarlet \
-            lsof \
-            psmisc \
-            util-linux \
-            mount \
-            kmod \
-            binutils \
-            coreutils \
-            grep \
-            sed \
-            gawk \
-            curl \
-            ca-certificates
+            --no-install-recommends \
+            "${PACKAGES[@]}"
 
+          echo
+          echo "============================================================"
+          echo "ANDROID SPARSE IMAGE TOOLS"
+          echo "============================================================"
+
+          if command -v simg2img >/dev/null 2>&1 && \
+             command -v img2simg >/dev/null 2>&1; then
+
+            echo "simg2img already available."
+            echo "img2simg already available."
+
+          else
+
+            echo "Android sparse tools missing."
+
+            if apt-cache show android-sdk-libsparse-utils >/dev/null 2>&1; then
+
+              echo "Installing android-sdk-libsparse-utils..."
+
+              sudo apt-get install -y \
+                --no-install-recommends \
+                android-sdk-libsparse-utils
+
+            fi
+
+          fi
+
+          # ------------------------------------------------------
+          # If Ubuntu does not provide the sparse package, try to
+          # locate the package through APT metadata rather than
+          # blindly installing an obsolete package.
+          # ------------------------------------------------------
+
+          if ! command -v simg2img >/dev/null 2>&1; then
+
+            echo "simg2img still missing."
+
+            CANDIDATE="$(
+              apt-cache policy \
+                android-sdk-libsparse-utils \
+                2>/dev/null |
+              awk '/Candidate:/ {print $2; exit}'
+            )"
+
+            if [ -n "${CANDIDATE:-}" ] && \
+               [ "$CANDIDATE" != "(none)" ]; then
+
+              echo "Candidate version: $CANDIDATE"
+
+              TMP_DEB="$RUNNER_TEMP/android-sdk-libsparse-utils.deb"
+
+              if apt-get download \
+                "android-sdk-libsparse-utils=${CANDIDATE}"; then
+
+                DEB="$(
+                  find . \
+                    -maxdepth 1 \
+                    -type f \
+                    -name 'android-sdk-libsparse-utils_*.deb' \
+                    -print |
+                  head -n 1 ||
+                  true
+                )"
+
+                if [ -n "$DEB" ]; then
+                  sudo apt-get install -y "$DEB" || true
+                fi
+
+              fi
+
+            fi
+
+          fi
+
+          echo
+          echo "============================================================"
+          echo "7-ZIP VALIDATION / FALLBACK"
+          echo "============================================================"
+
+          if command -v 7z >/dev/null 2>&1; then
+
+            echo "7z available:"
+            7z i | head -n 20 || true
+
+          elif command -v 7zz >/dev/null 2>&1; then
+
+            echo "7zz available:"
+            7zz i | head -n 20 || true
+
+            sudo ln -sf \
+              "$(command -v 7zz)" \
+              /usr/local/bin/7z
+
+          else
+
+            echo "ERROR: 7-Zip was not installed."
+            exit 1
+
+          fi
+
+          echo
+          echo "============================================================"
+          echo "XML TOOL VALIDATION"
+          echo "============================================================"
+
+          command -v xmllint
+          command -v xmlstarlet
+
+          xmllint --version || true
+          xmlstarlet --version || true
+
+          echo
+          echo "============================================================"
+          echo "FILESYSTEM TOOL VALIDATION"
+          echo "============================================================"
+
+          command -v mkfs.ext4
+          command -v e2fsck
+
+          command -v mkfs.erofs || {
+            echo "ERROR: mkfs.erofs missing."
+            exit 1
+          }
+
+          command -v fsck.erofs || {
+            echo "ERROR: fsck.erofs missing."
+            exit 1
+          }
+
+          command -v lz4
+          command -v zstd
+          command -v xz
+
+          echo
+          echo "============================================================"
+          echo "SPARSE IMAGE TOOL VALIDATION"
+          echo "============================================================"
+
+          if command -v simg2img >/dev/null 2>&1; then
+            echo "PASS: simg2img"
+            simg2img --help 2>&1 | head -n 5 || true
+          else
+            echo "WARNING: simg2img unavailable."
+          fi
+
+          if command -v img2simg >/dev/null 2>&1; then
+            echo "PASS: img2simg"
+            img2simg --help 2>&1 | head -n 5 || true
+          else
+            echo "WARNING: img2simg unavailable."
+          fi
+
+          echo
+          echo "============================================================"
+          echo "GENERAL TOOL VERSIONS"
+          echo "============================================================"
+
+          7z i 2>/dev/null | head -n 10 || true
+          lz4 --version || true
+          zstd --version || true
+          xz --version | head -n 1 || true
+          mkfs.ext4 -V || true
+          mkfs.erofs -V || true
+          e2fsck -V || true
+          file --version || true
+          rsync --version | head -n 1 || true
+          python3 --version
+          curl --version | head -n 1
           echo
           echo "============================================================"
           echo "Tool versions"
@@ -245,7 +528,94 @@ jobs:
             "$INPUT_ROM_TYPE" \
             "$INPUT_FS_TYPE"
 
+      # ==========================================================
+      # VALIDATE PORT ENGINE OUTPUT
+      # ==========================================================
 
+      - name: "🔎 Validate Port Engine Output"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          echo "============================================================"
+          echo "PORT ENGINE OUTPUT VALIDATION"
+          echo "============================================================"
+
+          ROOT="workspace/system_root"
+
+          if [ ! -d "$ROOT" ]; then
+            echo "ERROR: Port engine did not create:"
+            echo "$ROOT"
+            echo
+            echo "Workspace contents:"
+            find workspace \
+              -maxdepth 3 \
+              -type f \
+              -print \
+              2>/dev/null \
+              | sort \
+              | head -n 500 \
+              || true
+            exit 1
+          fi
+
+          echo "Found:"
+          echo "$ROOT"
+
+          if [ -d "$ROOT/system/system" ]; then
+            SYS="$ROOT/system/system"
+          elif [ -d "$ROOT/system" ]; then
+            SYS="$ROOT/system"
+          else
+            SYS="$ROOT"
+          fi
+
+          echo
+          echo "Resolved system root:"
+          echo "$SYS"
+
+          echo
+          echo "Top-level directories:"
+          find "$ROOT" \
+            -maxdepth 2 \
+            -type d \
+            -print \
+            | sort \
+            | head -n 200
+
+          echo
+          echo "System file count:"
+          find "$SYS" \
+            -type f \
+            2>/dev/null \
+            | wc -l
+
+          if [ ! -f "$SYS/build.prop" ]; then
+            echo "WARNING: build.prop not found."
+          fi
+
+          if [ -d "$SYS/apex" ]; then
+            echo "APEX directory detected."
+          fi
+
+          if [ -d "$SYS/system_ext" ]; then
+            echo "Nested system_ext detected."
+          fi
+
+          if [ -d "$SYS/product" ]; then
+            echo "Nested product detected."
+          fi
+
+          if [ -d "$SYS/etc" ]; then
+            echo "etc directory detected."
+          fi
+
+          echo
+          echo "============================================================"
+          echo "PORT OUTPUT VALIDATION COMPLETE"
+          echo "============================================================"
+
+          
       # ==========================================================
       # DOWNLOAD PIXEL FACTORY
       # ==========================================================
@@ -2089,6 +2459,12 @@ jobs:
 
           mkdir -p "$OUT"
 
+          if [ ! -d "$ROOT" ]; then
+            echo "ERROR: Missing system root:"
+            echo "$ROOT"
+            exit 1
+          fi
+
           if [ -d "$ROOT/system/system" ]; then
             SOURCE="$ROOT/system/system"
           elif [ -d "$ROOT/system" ]; then
@@ -2097,20 +2473,42 @@ jobs:
             SOURCE="$ROOT"
           fi
 
+          if [ ! -d "$SOURCE" ]; then
+            echo "ERROR: Invalid source directory:"
+            echo "$SOURCE"
+            exit 1
+          fi
+
           IMG="$OUT/${OUTPUT_NAME}.img"
 
           rm -f \
             "$IMG" \
             "$IMG.xz" \
-            "$IMG.gz"
+            "$IMG.gz" \
+            "$OUT/${OUTPUT_NAME}.sparse.img"
+
+          echo "============================================================"
+          echo "GSI IMAGE BUILD"
+          echo "============================================================"
 
           echo "Source:"
           echo "$SOURCE"
 
+          echo
           echo "Filesystem:"
           echo "$FS_TYPE"
 
+          echo
+          echo "Calculated image size:"
+          echo "$IMAGE_BYTES bytes"
+          numfmt --to=iec "$IMAGE_BYTES"
+
           if [ "$FS_TYPE" = "ext4" ]; then
+
+            echo
+            echo "============================================================"
+            echo "BUILDING EXT4"
+            echo "============================================================"
 
             truncate \
               -s "$IMAGE_BYTES" \
@@ -2122,7 +2520,11 @@ jobs:
               -O metadata_csum,64bit \
               "$IMG"
 
-            TEMP_MOUNT="$(mktemp -d)"
+            TEMP_MOUNT="$(
+              mktemp \
+                -d \
+                "$RUNNER_TEMP/gsi-mount.XXXXXX"
+            )"
 
             cleanup() {
               set +e
@@ -2141,9 +2543,12 @@ jobs:
               "$IMG" \
               "$TEMP_MOUNT"
 
-            sudo cp \
-              -a \
-              "$SOURCE"/. \
+            echo "Copying GSI contents..."
+
+            sudo rsync \
+              -aHAX \
+              --numeric-ids \
+              "$SOURCE"/ \
               "$TEMP_MOUNT"/
 
             sync
@@ -2154,26 +2559,73 @@ jobs:
 
             trap - EXIT
 
+            echo
+            echo "Running ext4 filesystem check..."
+
             e2fsck \
               -fy \
-              "$IMG" \
-              || true
+              "$IMG"
 
           elif [ "$FS_TYPE" = "erofs" ]; then
 
-            mkfs.erofs \
+            echo
+            echo "============================================================"
+            echo "BUILDING EROFS"
+            echo "============================================================"
+
+            echo "Trying LZ4HC compression..."
+
+            if mkfs.erofs \
               -zlz4hc \
               "$IMG" \
-              "$SOURCE"
+              "$SOURCE"; then
+
+              echo "EROFS LZ4HC build succeeded."
+
+            else
+
+              echo "LZ4HC failed."
+              rm -f "$IMG"
+
+              echo "Trying normal LZ4..."
+
+              if mkfs.erofs \
+                -zlz4 \
+                "$IMG" \
+                "$SOURCE"; then
+
+                echo "EROFS LZ4 build succeeded."
+
+              else
+
+                echo "LZ4 build failed."
+                rm -f "$IMG"
+
+                echo "Trying uncompressed EROFS..."
+
+                mkfs.erofs \
+                  "$IMG" \
+                  "$SOURCE"
+
+              fi
+
+            fi
 
           else
 
-            echo "Unsupported filesystem:"
+            echo "ERROR: Unsupported filesystem:"
             echo "$FS_TYPE"
 
             exit 1
 
           fi
+
+          echo
+          echo "============================================================"
+          echo "RAW IMAGE VALIDATION"
+          echo "============================================================"
+
+          test -f "$IMG"
 
           file "$IMG"
 
@@ -2181,14 +2633,42 @@ jobs:
             sudo blkid "$IMG" || true
           fi
 
-          # Keep the raw image intact and make sparse separately.
-          if command -v img2simg >/dev/null 2>&1 && [ "$FS_TYPE" = "ext4" ]; then
+          echo
+          echo "Raw image:"
+          ls -lh "$IMG"
+
+          # ------------------------------------------------------
+          # Sparse ext4 image
+          # ------------------------------------------------------
+
+          if [ "$FS_TYPE" = "ext4" ] && \
+             command -v img2simg >/dev/null 2>&1; then
+
+            echo
+            echo "Creating sparse image..."
 
             img2simg \
               "$IMG" \
               "$OUT/${OUTPUT_NAME}.sparse.img"
 
+            test -f "$OUT/${OUTPUT_NAME}.sparse.img"
+
+            echo "Sparse image:"
+            ls -lh "$OUT/${OUTPUT_NAME}.sparse.img"
+
+          else
+
+            echo
+            echo "Sparse image skipped."
+
           fi
+
+          # ------------------------------------------------------
+          # XZ
+          # ------------------------------------------------------
+
+          echo
+          echo "Creating XZ..."
 
           xz \
             -T0 \
@@ -2197,16 +2677,46 @@ jobs:
             "$IMG" \
             > "$IMG.xz"
 
+          # ------------------------------------------------------
+          # GZIP
+          # ------------------------------------------------------
+
+          echo
+          echo "Creating GZIP..."
+
           gzip \
             -9 \
             -c \
             "$IMG" \
             > "$IMG.gz"
 
+          # ------------------------------------------------------
+          # Final integrity checks
+          # ------------------------------------------------------
+
+          test -s "$IMG"
+          test -s "$IMG.xz"
+          test -s "$IMG.gz"
+
           echo
-          echo "FINAL OUTPUT:"
+          echo "============================================================"
+          echo "FINAL OUTPUT"
+          echo "============================================================"
+
           ls -lh "$OUT"
 
+          echo
+          echo "File types:"
+
+          file \
+            "$IMG" \
+            "$IMG.xz" \
+            "$IMG.gz"
+
+          if [ -f "$OUT/${OUTPUT_NAME}.sparse.img" ]; then
+            file "$OUT/${OUTPUT_NAME}.sparse.img"
+          fi
+           
 
       # ==========================================================
       # VALIDATE FINAL IMAGE
@@ -2252,7 +2762,6 @@ jobs:
       # ==========================================================
       # METADATA
       # ==========================================================
-
       - name: "🔑 Generate Checksums and Build Metadata"
         env:
           SOURCE_ROM: "${{ inputs.rom_url }}"
@@ -2267,17 +2776,28 @@ jobs:
 
           cd "$OUT"
 
+          : > SHA256SUMS.txt
+
+          echo "Generating checksums..."
+
           sha256sum \
-            *.img \
-            *.img.xz \
-            *.img.gz \
-            > SHA256SUMS.txt
+            "${OUTPUT_NAME}.img" \
+            "${OUTPUT_NAME}.img.xz" \
+            "${OUTPUT_NAME}.img.gz" \
+            >> SHA256SUMS.txt
 
           if [ -f "${OUTPUT_NAME}.sparse.img" ]; then
             sha256sum \
               "${OUTPUT_NAME}.sparse.img" \
               >> SHA256SUMS.txt
           fi
+
+          echo
+          echo "============================================================"
+          echo "SHA256SUMS"
+          echo "============================================================"
+
+          cat SHA256SUMS.txt
 
           python3 - <<'PY'
           import os
@@ -2325,6 +2845,9 @@ jobs:
               "",
               "google/panther/panther:16/BP2A.250605.031.A2/13578606:user/release-keys",
               "",
+              "FILESYSTEM",
+              fs_type,
+              "",
               "PIXEL PARTITIONS",
               "",
               "system.img: analyzed",
@@ -2341,6 +2864,7 @@ jobs:
               "Android 16: enabled",
               "GS201: enabled",
               "Treble: enabled",
+              "ARM64: enabled",
               "Pixel configuration: enabled",
               "eUICC: enabled",
               "Biometrics: enabled",
@@ -2354,20 +2878,23 @@ jobs:
               "",
               "IMAGE",
               "",
-              f"Filesystem: {fs_type}",
               f"Raw image bytes: {raw.stat().st_size}",
               f"XZ bytes: {xz.stat().st_size}",
               f"GZIP bytes: {gz.stat().st_size}",
           ]
 
           if sparse.exists():
-              lines.append(f"Sparse image bytes: {sparse.stat().st_size}")
+              lines.append(
+                  f"Sparse image bytes: {sparse.stat().st_size}"
+              )
 
           lines.extend([
               "",
               "GENERATED",
               "",
-              datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              datetime.now(timezone.utc).strftime(
+                  "%Y-%m-%dT%H:%M:%SZ"
+              ),
               "",
           ])
 
@@ -2412,16 +2939,13 @@ jobs:
             || true
 
 
-      # ==========================================================
-      # GITHUB RELEASE
-      # ==========================================================
-
       - name: "🏷️ Create GitHub Release"
         uses: softprops/action-gh-release@v3.0.3
         with:
           tag_name: "v${{ github.run_number }}-${{ github.run_id }}"
           name: "${{ inputs.output_name }} — Pixel 7 Panther"
           generate_release_notes: false
+          fail_on_unmatched_files: false
           files: |
             workspace/output/*.img
             workspace/output/*.img.xz
@@ -2437,7 +2961,6 @@ jobs:
             workspace/output/pixel-path-index.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
 
       # ==========================================================
       # TELEGRAM
