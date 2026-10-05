@@ -1,577 +1,567 @@
-name: "crDroid + Infinity X Custom Merge → Pixel 7"
+```yaml
+name: "🔧 Build HyperOS Treble GSI — Pixel 7 eSIM"
 
 on:
   workflow_dispatch:
     inputs:
-      crdroid_url:
-        description: "crDroid Pixel 7 OTA ZIP"
-        required: true
-        type: string
-        default: "https://cfhcable.dl.sourceforge.net/project/crdroid/panther/12.x/crDroidAndroid-16.0-20260913-panther-v12.12.zip?viasf=1&fid=0b1db699f8fcfb56&e=1791134595&st=HYy3ykqx0ckhpFKMA0nj-g"
-      infinityx_url:
-        description: "Infinity X Pixel 7 GAPPS OTA ZIP"
-        required: true
-        type: string
-        default: "https://gigenet.dl.sourceforge.net/project/infinity-x/panther/16/gapps/Project_Infinity-X-3.12-panther-26.08.2026-GAPPS-OFFICIAL.zip?viasf=1&fid=1961a3e072f3cc70&e=1791134670&st=dkU2Q1WZ5dZDXAju0w2Pzw"
-      output_name:
-        description: "Output name"
-        required: true
-        type: string
-        default: "crDroid-InfinityX-Pixel7"
-      systemui_mode:
-        description: "Infinity X SystemUI behavior"
-        required: true
-        type: choice
-        default: "swap-if-compatible"
-        options:
-          - "keep-crdroid"
-          - "swap-if-compatible"
-      build_firmware_bundle:
-        description: "Download matching Pixel 7 factory firmware and make a flash bundle"
-        required: true
-        type: boolean
-        default: true
-      factory_url:
-        description: "Pixel 7 factory image ZIP"
+      system_image:
+        description: "HyperOS system.img path"
         required: false
+        default: "/home/sal/_work/h3cknn-gsi-building-tool/h3cknn-gsi-building-tool/workspace/download/system.img"
         type: string
-        default: "https://dl.google.com/dl/android/aosp/panther-bp4a.251205.006-factory-4455f800.zip"
+
+      output_name:
+        description: "Output GSI name"
+        required: false
+        default: "HyperOS-Android16-Pixel7-Treble"
+        type: string
+
+      enable_euicc:
+        description: "Enable Pixel eUICC/eSIM framework compatibility"
+        required: false
+        default: true
+        type: boolean
 
 jobs:
-  merge_roms:
-    runs-on: ubuntu-latest
-    timeout-minutes: 240
-    permissions:
-      contents: write
+  build:
+    name: "📦 Build HyperOS Treble GSI"
+    runs-on: self-hosted
 
     steps:
-      - name: "Checkout repository"
-        uses: actions/checkout@v5
 
-
-      - name: "Install dependencies"
+      # ------------------------------------------------------------
+      # 1. Basic environment
+      # ------------------------------------------------------------
+      - name: "📁 Locate workspace"
+        shell: bash
         run: |
+          set -eux
+
+          WORKSPACE="/home/sal/_work/h3cknn-gsi-building-tool/h3cknn-gsi-building-tool/workspace"
+          DOWNLOAD="$WORKSPACE/download"
+          SYSTEM="$DOWNLOAD/system.img"
+
+          echo "WORKSPACE=$WORKSPACE" >> "$GITHUB_ENV"
+          echo "DOWNLOAD=$DOWNLOAD" >> "$GITHUB_ENV"
+          echo "SYSTEM=$SYSTEM" >> "$GITHUB_ENV"
+
+          mkdir -p "$WORKSPACE"
+          mkdir -p "$DOWNLOAD"
+
+          echo "Workspace:"
+          ls -lah "$WORKSPACE"
+
+          echo "Download directory:"
+          ls -lah "$DOWNLOAD"
+
+          test -f "$SYSTEM"
+
+          echo
+          echo "Found HyperOS system image:"
+          ls -lh "$SYSTEM"
+
+      # ------------------------------------------------------------
+      # 2. Install required host tools
+      # ------------------------------------------------------------
+      - name: "🛠️ Install image tools"
+        shell: bash
+        run: |
+          set -eux
+
           sudo apt-get update
+
           sudo apt-get install -y \
-            android-sdk-libsparse-utils \
             e2fsprogs \
             erofs-utils \
-            attr \
-            rsync \
-            xxd \
-            file \
+            lz4 \
+            xz-utils \
+            gzip \
             unzip \
             zip \
-            p7zip-full \
-            jq \
-            curl \
-            wget \
+            rsync \
+            file \
             python3 \
             python3-pip \
-            openjdk-17-jre-headless \
-            lz4
+            git \
+            mount \
+            util-linux \
+            android-sdk-libsparse-utils
 
-          sudo apt-get clean
+          command -v e2fsck
+          command -v resize2fs
+          command -v mkfs.ext4
+          command -v file
 
-      - name: "Install APK tooling"
+      # ------------------------------------------------------------
+      # 3. Detect filesystem
+      # ------------------------------------------------------------
+      - name: "🔍 Detect HyperOS filesystem"
+        shell: bash
         run: |
-          set -euo pipefail
-          mkdir -p "$GITHUB_WORKSPACE/tools"
+          set -eux
 
-          # Apktool
-          APKTOOL_VERSION="2.10.0"
-          curl -fL --retry 5 --retry-all-errors \
-            -o "$GITHUB_WORKSPACE/tools/apktool.jar" \
-            "https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VERSION}/apktool_${APKTOOL_VERSION}.jar"
+          file "$SYSTEM"
 
-          # apktool needs a framework-aware Java environment.
-          java -version
-          java -jar "$GITHUB_WORKSPACE/tools/apktool.jar" --version
+          mkdir -p "$WORKSPACE/image_info"
 
-          # zipalign is normally supplied by Android build-tools. Download a
-          # small command-line copy if the runner does not already have it.
-          if ! command -v zipalign >/dev/null 2>&1; then
-            echo "::warning::zipalign is not installed on the runner."
-            echo "The merge script can still fall back to an unaligned APK."
+          file "$SYSTEM" > "$WORKSPACE/image_info/filesystem.txt"
+
+          if command -v dump.erofs >/dev/null 2>&1; then
+            dump.erofs "$SYSTEM" \
+              > "$WORKSPACE/image_info/erofs.txt" 2>&1 || true
           fi
 
-      - name: "Verify merge script"
-        run: |
-          set -euo pipefail
-          if [ ! -f graft_apk.py ]; then
-            echo "::error::graft_apk.py is missing from the repository."
-            echo "Put the supplied graft_apk.py next to this workflow."
-            exit 1
-          fi
-          python3 -m py_compile graft_apk.py
-
-      - name: "Download crDroid and Infinity X OTA ZIPs"
-        env:
-          CRDROID_URL: ${{ inputs.crdroid_url }}
-          INFINITYX_URL: ${{ inputs.infinityx_url }}
-        run: |
-          set -euo pipefail
-
-          mkdir -p workspace/downloads
-
-          curl -fL --retry 8 --retry-delay 5 --retry-all-errors \
-            -o workspace/downloads/crdroid.zip "$CRDROID_URL"
-
-          curl -fL --retry 8 --retry-delay 5 --retry-all-errors \
-            -o workspace/downloads/infinityx.zip "$INFINITYX_URL"
-
-          echo "Downloaded:"
-          ls -lh workspace/downloads/
-
-      - name: "Extract payload.bin from both OTAs"
-        run: |
-          set -euo pipefail
-
-          mkdir -p workspace/crdroid_ota workspace/infinityx_ota
-
-          unzip -q workspace/downloads/crdroid.zip \
-            -d workspace/crdroid_ota
-
-          unzip -q workspace/downloads/infinityx.zip \
-            -d workspace/infinityx_ota
-
-          find workspace/crdroid_ota -type f -name payload.bin -print
-          find workspace/infinityx_ota -type f -name payload.bin -print
-
-          CR_PAYLOAD="$(find workspace/crdroid_ota -type f -name payload.bin | head -n1)"
-          IX_PAYLOAD="$(find workspace/infinityx_ota -type f -name payload.bin | head -n1)"
-
-          if [ -z "$CR_PAYLOAD" ]; then
-            echo "::error::No crDroid payload.bin was found."
-            exit 1
+          if command -v tune2fs >/dev/null 2>&1; then
+            tune2fs -l "$SYSTEM" \
+              > "$WORKSPACE/image_info/ext4.txt" 2>&1 || true
           fi
 
-          if [ -z "$IX_PAYLOAD" ]; then
-            echo "::error::No Infinity X payload.bin was found."
-            exit 1
-          fi
+          cat "$WORKSPACE/image_info/filesystem.txt"
 
-          cp "$CR_PAYLOAD" workspace/crdroid_payload.bin
-          cp "$IX_PAYLOAD" workspace/infinityx_payload.bin
-
-      - name: "Install payload-dumper-go"
+      # ------------------------------------------------------------
+      # 4. Create working image
+      # ------------------------------------------------------------
+      - name: "📋 Prepare working system image"
+        shell: bash
         run: |
-          set -euo pipefail
+          set -eux
 
-          mkdir -p tools/payload
+          rm -rf "$WORKSPACE/treble_work"
+          mkdir -p "$WORKSPACE/treble_work"
 
-          API_JSON="$(curl -fsSL \
-            -H 'Accept: application/vnd.github+json' \
-            https://api.github.com/repos/ssut/payload-dumper-go/releases/latest)"
+          cp --reflink=auto \
+            "$SYSTEM" \
+            "$WORKSPACE/treble_work/system-original.img"
 
-          TAG="$(echo "$API_JSON" | jq -r '.tag_name')"
-          echo "payload-dumper-go release: $TAG"
+          cp --reflink=auto \
+            "$SYSTEM" \
+            "$WORKSPACE/treble_work/system.img"
 
-          ASSET_URL="$(echo "$API_JSON" | jq -r '
-            .assets[]
-            | select(.name | test("linux.*amd64|Linux.*amd64|linux.*x86_64"; "i"))
-            | .browser_download_url
-          ' | head -n1)"
+          chmod 0644 \
+            "$WORKSPACE/treble_work/system.img"
 
-          if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" = "null" ]; then
-            echo "::error::Could not find a Linux amd64 payload-dumper-go release."
-            echo "$API_JSON" | jq -r '.assets[].name'
-            exit 1
-          fi
+          ls -lh "$WORKSPACE/treble_work/"
 
-          curl -fL --retry 5 --retry-all-errors \
-            -o tools/payload/payload-dumper.tar.gz "$ASSET_URL"
-
-          tar -xzf tools/payload/payload-dumper.tar.gz \
-            -C tools/payload
-
-          PAYLOAD_BIN="$(find tools/payload -type f -perm -111 | head -n1)"
-          if [ -z "$PAYLOAD_BIN" ]; then
-            PAYLOAD_BIN="$(find tools/payload -type f -name 'payload-dumper-go' | head -n1)"
-          fi
-
-          if [ -z "$PAYLOAD_BIN" ]; then
-            echo "::error::payload-dumper-go binary was not found."
-            find tools/payload -maxdepth 3 -type f -print
-            exit 1
-          fi
-
-          chmod +x "$PAYLOAD_BIN"
-          echo "PAYLOAD_DUMPER=$GITHUB_WORKSPACE/$PAYLOAD_BIN" >> "$GITHUB_ENV"
-
-      - name: "Extract crDroid and Infinity X payloads"
+      # ------------------------------------------------------------
+      # 5. Determine filesystem and mount it
+      # ------------------------------------------------------------
+      - name: "📂 Mount HyperOS system image"
+        shell: bash
         run: |
-          set -euo pipefail
+          set -eux
 
-          mkdir -p workspace/images/crdroid workspace/images/infinityx
+          IMAGE="$WORKSPACE/treble_work/system.img"
+          ROOT="$WORKSPACE/treble_work/root"
 
-          "$PAYLOAD_DUMPER" \
-            -o workspace/images/crdroid \
-            workspace/crdroid_payload.bin
+          mkdir -p "$ROOT"
 
-          "$PAYLOAD_DUMPER" \
-            -o workspace/images/infinityx \
-            workspace/infinityx_payload.bin
+          FS="$(file -b "$IMAGE")"
+          echo "$FS"
 
-          echo "::group::crDroid extracted partitions"
-          find workspace/images/crdroid -maxdepth 1 -type f -printf '%f\n' | sort
-          echo "::endgroup::"
+          if echo "$FS" | grep -qiE 'EROFS|erofs'; then
+            echo "EROFS detected."
 
-          echo "::group::Infinity X extracted partitions"
-          find workspace/images/infinityx -maxdepth 1 -type f -printf '%f\n' | sort
-          echo "::endgroup::"
+            mkdir -p "$WORKSPACE/treble_work/extracted"
 
-          test -f workspace/images/crdroid/system.img
-          test -f workspace/images/infinityx/system.img
-
-      - name: "Delete OTA archives and payload directories"
-        run: |
-          set -euo pipefail
-
-          rm -f workspace/downloads/crdroid.zip
-          rm -f workspace/downloads/infinityx.zip
-
-          # The request is specifically to remove ./payload only when it exists.
-          if [ -d "./payload" ]; then
-            echo "Deleting ./payload"
-            rm -rf "./payload"
-          else
-            echo "No ./payload directory exists; leaving it untouched."
-          fi
-
-          # Also remove extracted OTA payload directories after their
-          # payload.bin files have been copied.
-          rm -rf workspace/crdroid_ota workspace/infinityx_ota
-          rm -f workspace/crdroid_payload.bin workspace/infinityx_payload.bin
-
-      - name: "Convert sparse images when necessary"
-        run: |
-          set -euo pipefail
-
-          hex4() {
-            dd if="$1" bs=1 count=4 2>/dev/null | xxd -p
-          }
-
-          convert_tree() {
-            ROOT="$1"
-            for img in "$ROOT"/*.img; do
-              [ -f "$img" ] || continue
-
-              if [ "$(hex4 "$img")" = "ed26ff3a" ]; then
-                echo "Converting sparse image: $img"
-                simg2img "$img" "${img}.raw"
-                mv "${img}.raw" "$img"
-              fi
-            done
-          }
-
-          convert_tree workspace/images/crdroid
-          convert_tree workspace/images/infinityx
-
-      - name: "Prepare writable ROM trees"
-        run: |
-          set -euo pipefail
-
-          W="$GITHUB_WORKSPACE/workspace"
-          mkdir -p "$W/mnt/cr_system" "$W/mnt/ix_system"
-          mkdir -p "$W/mnt/cr_system_ext" "$W/mnt/ix_system_ext"
-          mkdir -p "$W/mnt/cr_product" "$W/mnt/ix_product"
-          mkdir -p "$W/mnt/cr_framework" "$W/mnt/ix_framework"
-
-          mount_img() {
-            IMG="$1"
-            MNT="$2"
-
-            if [ ! -f "$IMG" ]; then
-              echo "::warning::Missing image: $IMG"
-              return 0
-            fi
-
-            if file "$IMG" | grep -qi 'EROFS'; then
-              sudo mount -t erofs -o loop,ro "$IMG" "$MNT"
+            if command -v fsck.erofs >/dev/null 2>&1; then
+              fsck.erofs \
+                --extract="$WORKSPACE/treble_work/extracted" \
+                "$IMAGE"
             else
-              sudo mount -t ext4 -o loop,ro,noload "$IMG" "$MNT"
+              echo "ERROR: EROFS extraction support is unavailable."
+              exit 1
             fi
-          }
 
-          mount_img "$W/images/crdroid/system.img" "$W/mnt/cr_system"
-          mount_img "$W/images/infinityx/system.img" "$W/mnt/ix_system"
+            echo "EROFS extraction completed."
 
-          if [ -f "$W/images/crdroid/system_ext.img" ]; then
-            mount_img "$W/images/crdroid/system_ext.img" "$W/mnt/cr_system_ext"
-          fi
+          elif echo "$FS" | grep -qiE 'ext4|ext2|ext3'; then
+            echo "EXT filesystem detected."
 
-          if [ -f "$W/images/infinityx/system_ext.img" ]; then
-            mount_img "$W/images/infinityx/system_ext.img" "$W/mnt/ix_system_ext"
-          fi
+            sudo mount -o loop,rw \
+              "$IMAGE" \
+              "$ROOT"
 
-          if [ -f "$W/images/crdroid/product.img" ]; then
-            mount_img "$W/images/crdroid/product.img" "$W/mnt/cr_product"
-          fi
+            echo "Mounted:"
+            mount | grep "$ROOT"
 
-          if [ -f "$W/images/infinityx/product.img" ]; then
-            mount_img "$W/images/infinityx/product.img" "$W/mnt/ix_product"
-          fi
-
-      - name: "Create writable copies"
-        run: |
-          set -euo pipefail
-
-          W="$GITHUB_WORKSPACE/workspace"
-          mkdir -p "$W/tree/crdroid" "$W/tree/infinityx"
-
-          copy_tree() {
-            SRC="$1"
-            DST="$2"
-
-            sudo rsync -aHAX --numeric-ids "$SRC"/ "$DST"/
-            sudo chown -R "$USER":"$USER" "$DST"
-          }
-
-          copy_tree "$W/mnt/cr_system" "$W/tree/crdroid/system"
-          copy_tree "$W/mnt/ix_system" "$W/tree/infinityx/system"
-
-          if mountpoint -q "$W/mnt/cr_system_ext"; then
-            copy_tree "$W/mnt/cr_system_ext" "$W/tree/crdroid/system_ext"
           else
-            mkdir -p "$W/tree/crdroid/system_ext"
+            echo "ERROR: Unsupported system image filesystem:"
+            echo "$FS"
+            exit 1
           fi
 
-          if mountpoint -q "$W/mnt/ix_system_ext"; then
-            copy_tree "$W/mnt/ix_system_ext" "$W/tree/infinityx/system_ext"
+      # ------------------------------------------------------------
+      # 6. Create Treble compatibility configuration
+      # ------------------------------------------------------------
+      - name: "🧩 Add Treble configuration"
+        shell: bash
+        run: |
+          set -eux
+
+          if [ -d "$WORKSPACE/treble_work/extracted" ]; then
+            ROOT="$WORKSPACE/treble_work/extracted"
           else
-            mkdir -p "$W/tree/infinityx/system_ext"
+            ROOT="$WORKSPACE/treble_work/root"
           fi
 
-          if mountpoint -q "$W/mnt/cr_product"; then
-            copy_tree "$W/mnt/cr_product" "$W/tree/crdroid/product"
+          mkdir -p "$ROOT/system/etc"
+          mkdir -p "$ROOT/system_ext/etc"
+          mkdir -p "$ROOT/product/etc"
+
+          # Generic Treble properties.
+          cat > "$ROOT/system/etc/treble-hyperos.conf" <<'EOF'
+          # HyperOS Treble GSI
+          # Pixel 7 / panther
+          # Android 16
+
+          ro.treble.enabled=true
+          ro.vndk.lite=true
+
+          ro.product.first_api_level=31
+
+          ro.hardware.type=treble
+
+          persist.sys.phh.disable_expand=false
+          persist.sys.phh.disable_gestures=false
+          EOF
+
+          # Do not replace the device vendor.
+          # The Pixel vendor partition provides the hardware HALs.
+          cat > "$ROOT/system/etc/init/treble-hyperos.rc" <<'EOF'
+          on post-fs-data
+              setprop persist.sys.phh.disable_expand false
+
+          on boot
+              setprop ro.treble.enabled true
+          EOF
+
+          mkdir -p "$ROOT/system/etc/init"
+
+          echo "Treble configuration installed."
+
+      # ------------------------------------------------------------
+      # 7. Pixel 7 eUICC / eSIM framework configuration
+      # ------------------------------------------------------------
+      - name: "📡 Add Pixel 7 eUICC/eSIM compatibility"
+        if: ${{ inputs.enable_euicc }}
+        shell: bash
+        run: |
+          set -eux
+
+          if [ -d "$WORKSPACE/treble_work/extracted" ]; then
+            ROOT="$WORKSPACE/treble_work/extracted"
           else
-            mkdir -p "$W/tree/crdroid/product"
+            ROOT="$WORKSPACE/treble_work/root"
           fi
 
-          if mountpoint -q "$W/mnt/ix_product"; then
-            copy_tree "$W/mnt/ix_product" "$W/tree/infinityx/product"
+          mkdir -p "$ROOT/system/etc"
+
+          # Android framework configuration.
+          #
+          # These properties advertise eUICC capability to the
+          # framework without replacing the Pixel vendor eSIM HAL.
+          cat > "$ROOT/system/etc/euicc-pixel7.conf" <<'EOF'
+          # Pixel 7 / panther eUICC compatibility
+          # Keep Google's stock vendor eUICC implementation.
+
+          persist.radio.multisim.config=dsds
+
+          ro.telephony.euicc=true
+          persist.sys.euicc.enabled=true
+          EOF
+
+          # Permissions/configuration used by Android telephony.
+          mkdir -p "$ROOT/system/etc/permissions"
+
+          cat > "$ROOT/system/etc/permissions/hyperos-euicc.xml" <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <permissions>
+
+              <feature name="android.hardware.telephony" />
+
+              <feature name="android.hardware.telephony.subscription" />
+
+              <feature name="android.hardware.telephony.euicc" />
+
+          </permissions>
+          EOF
+
+          # Carrier/eSIM framework hints.
+          mkdir -p "$ROOT/system/etc/sysconfig"
+
+          cat > "$ROOT/system/etc/sysconfig/hyperos-euicc.xml" <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <config>
+
+              <allow-in-power-save package="com.android.euicc" />
+
+              <allow-in-data-usage-save package="com.android.euicc" />
+
+          </config>
+          EOF
+
+          echo "eUICC compatibility configuration installed."
+
+      # ------------------------------------------------------------
+      # 8. Preserve Google's Pixel eSIM packages if they already
+      #    exist in the HyperOS image.
+      # ------------------------------------------------------------
+      - name: "🔎 Check eUICC framework packages"
+        if: ${{ inputs.enable_euicc }}
+        shell: bash
+        run: |
+          set -eux
+
+          if [ -d "$WORKSPACE/treble_work/extracted" ]; then
+            ROOT="$WORKSPACE/treble_work/extracted"
           else
-            mkdir -p "$W/tree/infinityx/product"
+            ROOT="$WORKSPACE/treble_work/root"
           fi
 
-          for M in \
-            "$W/mnt/cr_system" \
-            "$W/mnt/ix_system" \
-            "$W/mnt/cr_system_ext" \
-            "$W/mnt/ix_system_ext" \
-            "$W/mnt/cr_product" \
-            "$W/mnt/ix_product"; do
-            sudo umount "$M" 2>/dev/null || true
-          done
+          echo "Searching for eUICC components..."
 
-      - name: "Prepare framework sets"
+          find "$ROOT" \
+            -type f \
+            \( \
+              -iname '*euicc*' \
+              -o -iname '*lpa*' \
+              -o -iname '*esim*' \
+            \) \
+            -print \
+            | sort \
+            > "$WORKSPACE/image_info/euicc-files.txt" || true
+
+          cat "$WORKSPACE/image_info/euicc-files.txt" || true
+
+          echo
+          echo "Android EuiccManager references:"
+          grep -R \
+            -i \
+            -E 'EuiccManager|EuiccService|euicc' \
+            "$ROOT/system/framework" \
+            2>/dev/null \
+            | head -100 \
+            || true
+
+      # ------------------------------------------------------------
+      # 9. Add generic Treble VINTF compatibility directory
+      # ------------------------------------------------------------
+      - name: "🧬 Add Treble VINTF compatibility"
+        shell: bash
         run: |
-          set -euo pipefail
+          set -eux
 
-          W="$GITHUB_WORKSPACE/workspace"
-
-          mkdir -p "$W/framework/crdroid" "$W/framework/infinityx"
-
-          collect_framework() {
-            ROOT="$1"
-            OUT="$2"
-
-            find "$ROOT" \
-              -type f \
-              \( -name '*.jar' -o -name '*-res.apk' \) \
-              -exec cp -n {} "$OUT/" \; || true
-          }
-
-          collect_framework "$W/tree/crdroid/system/framework" "$W/framework/crdroid"
-          collect_framework "$W/tree/crdroid/system_ext/framework" "$W/framework/crdroid"
-
-          collect_framework "$W/tree/infinityx/system/framework" "$W/framework/infinityx"
-          collect_framework "$W/tree/infinityx/system_ext/framework" "$W/framework/infinityx"
-
-          echo "::group::crDroid framework"
-          find "$W/framework/crdroid" -maxdepth 1 -type f -printf '%f\n' | sort
-          echo "::endgroup::"
-
-          echo "::group::Infinity X framework"
-          find "$W/framework/infinityx" -maxdepth 1 -type f -printf '%f\n' | sort
-          echo "::endgroup::"
-
-      - name: "Locate Settings and SystemUI"
-        run: |
-          set -euo pipefail
-
-          W="$GITHUB_WORKSPACE/workspace"
-
-          locate_app() {
-            ROOT="$1"
-            NAME="$2"
-
-            find "$ROOT" \
-              -type f \
-              -path '*/app/*' \
-              -o -type f \
-              -path '*/priv-app/*' \
-              | grep -E "/${NAME}$" | head -n1 || true
-          }
-
-          for ROM in crdroid infinityx; do
-            echo "===== $ROM ====="
-            find "$W/tree/$ROM" -type f \
-              \( -name 'Settings.apk' \
-              -o -name 'SettingsGoogle.apk' \
-              -o -name 'SystemUI.apk' \
-              -o -name 'SystemUIGoogle.apk' \) \
-              -print
-          done
-
-      - name: "Merge Infinity X customization into crDroid"
-        env:
-          SYSTEMUI_MODE: ${{ inputs.systemui_mode }}
-        run: |
-          set -euo pipefail
-
-          W="$GITHUB_WORKSPACE/workspace"
-
-          # The supplied graft_apk.py expects the APKs/frameworks to be
-          # reachable from system_ext. If a ROM stores them elsewhere,
-          # stage symlinks/copies in a temporary system_ext tree.
-          mkdir -p "$W/graft/crdroid/system_ext" "$W/graft/infinityx/system_ext"
-
-          rsync -a "$W/tree/crdroid/system_ext/" \
-            "$W/graft/crdroid/system_ext/" || true
-
-          rsync -a "$W/tree/infinityx/system_ext/" \
-            "$W/graft/infinityx/system_ext/" || true
-
-          find_app() {
-            ROOT="$1"
-            NAME="$2"
-            find "$ROOT" -type f \
-              \( -path '*/priv-app/*' -o -path '*/app/*' \) \
-              -name "$NAME" | head -n1 || true
-          }
-
-          stage_app() {
-            SOURCE_ROOT="$1"
-            STAGE_ROOT="$2"
-            NAME="$3"
-
-            SRC="$(find_app "$SOURCE_ROOT" "$NAME")"
-            [ -n "$SRC" ] || return 0
-
-            REL="${SRC#$SOURCE_ROOT/}"
-            DEST="$STAGE_ROOT/$REL"
-
-            mkdir -p "$(dirname "$DEST")"
-            cp -a "$SRC" "$DEST"
-            echo "Staged $NAME: $SRC"
-          }
-
-          stage_app "$W/tree/crdroid" "$W/graft/crdroid/system_ext" Settings.apk
-          stage_app "$W/tree/crdroid" "$W/graft/crdroid/system_ext" SettingsGoogle.apk
-          stage_app "$W/tree/infinityx" "$W/graft/infinityx/system_ext" Settings.apk
-          stage_app "$W/tree/infinityx" "$W/graft/infinityx/system_ext" SettingsGoogle.apk
-
-          stage_app "$W/tree/crdroid" "$W/graft/crdroid/system_ext" SystemUI.apk
-          stage_app "$W/tree/crdroid" "$W/graft/crdroid/system_ext" SystemUIGoogle.apk
-          stage_app "$W/tree/infinityx" "$W/graft/infinityx/system_ext" SystemUI.apk
-          stage_app "$W/tree/infinityx" "$W/graft/infinityx/system_ext" SystemUIGoogle.apk
-
-          set +e
-          python3 graft_apk.py \
-            --apktool "$GITHUB_WORKSPACE/tools/apktool.jar" \
-            --cr-sysext "$W/graft/crdroid/system_ext" \
-            --ix-sysext "$W/graft/infinityx/system_ext" \
-            --cr-fw "$W/framework/crdroid" \
-            --ix-fw "$W/framework/infinityx" \
-            --work "$W/merge" \
-            --settings graft \
-            --systemui "$SYSTEMUI_MODE"
-          STATUS=$?
-          set -e
-
-          # graft_apk.py is deliberately non-fatal. Even if a particular
-          # component cannot be merged, keep the crDroid APK.
-          echo "graft_apk.py exit status: $STATUS"
-
-          if [ -f "$W/merge/merge-report.txt" ]; then
-            cp "$W/merge/merge-report.txt" "$W/merge-report.txt"
-            cat "$W/merge-report.txt"
+          if [ -d "$WORKSPACE/treble_work/extracted" ]; then
+            ROOT="$WORKSPACE/treble_work/extracted"
+          else
+            ROOT="$WORKSPACE/treble_work/root"
           fi
 
-      - name: "Install merged Settings/SystemUI back into crDroid"
+          mkdir -p "$ROOT/system/etc/vintf"
+
+          cat > "$ROOT/system/etc/vintf/manifest.xml" <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <manifest version="1.0" type="framework">
+              <!--
+                  Framework-side Treble manifest.
+
+                  Hardware implementations remain on the Pixel vendor
+                  partition. Do not declare fake HAL implementations here.
+              -->
+          </manifest>
+          EOF
+
+          echo "VINTF compatibility directory created."
+
+      # ------------------------------------------------------------
+      # 10. Set correct permissions
+      # ------------------------------------------------------------
+      - name: "🔐 Fix permissions"
+        shell: bash
         run: |
-          set -euo pipefail
+          set -eux
 
-          W="$GITHUB_WORKSPACE/workspace"
-
-          if [ -f "$W/merge/settings/Settings.merged.apk" ]; then
-            CR_SETTINGS="$(find "$W/tree/crdroid" -type f -name 'Settings.apk' | head -n1 || true)"
-            if [ -n "$CR_SETTINGS" ]; then
-              cp "$W/merge/settings/Settings.merged.apk" "$CR_SETTINGS"
-              chmod 0644 "$CR_SETTINGS"
-              echo "Installed merged Settings.apk"
-            fi
+          if [ -d "$WORKSPACE/treble_work/extracted" ]; then
+            ROOT="$WORKSPACE/treble_work/extracted"
+          else
+            ROOT="$WORKSPACE/treble_work/root"
           fi
 
-          if [ -f "$W/merge/settings/Settings.merged.apk" ] && \
-             find "$W/tree/crdroid" -type f -name 'SettingsGoogle.apk' | grep -q .; then
-            echo "SettingsGoogle.apk exists separately; the supplied graft script's Settings path was used."
-          fi
+          sudo chown -R root:root "$ROOT" || true
 
-          if [ -f "$W/merge/SystemUI.swapped.apk" ]; then
-            CR_UI="$(find "$W/tree/crdroid" -type f \
-              \( -name 'SystemUI.apk' -o -name 'SystemUIGoogle.apk' \) | head -n1 || true)"
-            if [ -n "$CR_UI" ]; then
-              cp "$W/merge/SystemUI.swapped.apk" "$CR_UI"
-              chmod 0644 "$CR_UI"
-              echo "Installed compatible Infinity X SystemUI"
-            fi
-          fi
+          sudo find "$ROOT/system/etc" \
+            -type f \
+            -exec chmod 0644 {} \;
 
-      - name: "Merge safe Infinity X overlays and XML customization"
+          sudo find "$ROOT/system/etc/init" \
+            -type f \
+            -exec chmod 0644 {} \; \
+            2>/dev/null || true
+
+      # ------------------------------------------------------------
+      # 11. Unmount EXT4 image
+      # ------------------------------------------------------------
+      - name: "💾 Unmount modified image"
+        shell: bash
         run: |
-          set -euo pipefail
+          set -eux
 
-          W="$GITHUB_WORKSPACE/workspace"
+          ROOT="$WORKSPACE/treble_work/root"
 
-          merge_missing_tree() {
-            SRC="$1"
-            DST="$2"
+          if mountpoint -q "$ROOT"; then
+            sync
+            sudo umount "$ROOT"
+          fi
 
-            [ -d "$SRC" ] || return 0
-            mkdir -p "$DST"
+      # ------------------------------------------------------------
+      # 12. Rebuild EXT4 image OR rebuild EROFS image
+      # ------------------------------------------------------------
+      - name: "🏗️ Rebuild Treble system.img"
+        shell: bash
+        run: |
+          set -eux
 
-            rsync -a \
-              --ignore-existing \
-              "$SRC"/ "$DST"/ || true
-          }
+          IMAGE="$WORKSPACE/treble_work/system.img"
 
-          # Copy only files that do not already exist in crDroid.
-          # This preserves crDroid's base framework while exposing
-          # Infinity X-only overlays/configuration where names do not collide.
-          merge_missing_tree \
-            "$W/tree/infinityx/product/overlay" \
-            "$W/tree/crdroid/product/overlay"
+          if [ -d "$WORKSPACE/treble_work/extracted" ]; then
+            echo "Building EROFS image."
 
-          merge_missing_tree \
-            "$W/tree/infinityx/product/etc/sysconfig" \
-            "$W/tree/crdroid/product/etc/sysconfig"
+            rm -f "$WORKSPACE/treble_work/system-new.img"
 
-          merge_missing_tree \
-            "$W/tree/infinityx/product/etc/permissions" \
-            "$W/tree/crdroid/product/etc/permissions"
+            mkfs.erofs \
+              -zlz4hc \
+              "$WORKSPACE/treble_work/system-new.img" \
+              "$WORKSPACE/treble_work/extracted"
 
-          merge_missing_tree \
-            "$W/tree/infinityx/system_ext/etc/sysconfig" \
-            "$W/tree/crdroid/system_ext/etc/sysconfig"
+            mv \
+              "$WORKSPACE/treble_work/system-new.img" \
+              "$IMAGE"
 
-          merge_missing_tree \
-            "$W/tree/infinityx/system_ext/etc/permissions" \
-            "$W/tree/crdroid/system_ext/etc/permissions"
+          else
+            echo "EXT4 image was modified in-place."
 
-          # Remove stale compiled artifacts. Android will regenerate them.
-          find "$W/tree/crdroid" -type d \
-            \( -name oat -o -name dalvik-cache \) \
-            
+            sudo e2fsck -fy "$IMAGE" || true
+            sudo resize2fs -M "$IMAGE" || true
+          fi
+
+          file "$IMAGE"
+          ls -lh "$IMAGE"
+
+      # ------------------------------------------------------------
+      # 13. Basic Android image verification
+      # ------------------------------------------------------------
+      - name: "✅ Verify Treble GSI"
+        shell: bash
+        run: |
+          set -eux
+
+          IMAGE="$WORKSPACE/treble_work/system.img"
+
+          echo "Image:"
+          file "$IMAGE"
+
+          echo
+          echo "Size:"
+          stat -c '%n %s bytes' "$IMAGE"
+
+          echo
+          echo "SHA256:"
+          sha256sum "$IMAGE"
+
+          echo
+          echo "Treble configuration:"
+          if command -v debugfs >/dev/null 2>&1; then
+            printf 'cat /system/etc/treble-hyperos.conf\nquit\n' \
+              | debugfs "$IMAGE" \
+              2>/dev/null || true
+          fi
+
+      # ------------------------------------------------------------
+      # 14. Install final image at EXACT requested location
+      # ------------------------------------------------------------
+      - name: "📦 Install final HyperOS Treble GSI"
+        shell: bash
+        run: |
+          set -eux
+
+          FINAL="$WORKSPACE/download/system.img"
+          BUILT="$WORKSPACE/treble_work/system.img"
+
+          test -f "$BUILT"
+
+          cp --reflink=auto \
+            "$BUILT" \
+            "$FINAL"
+
+          chmod 0644 "$FINAL"
+
+          sync
+
+          echo
+          echo "=========================================="
+          echo " FINAL HYPEROS TREBLE GSI"
+          echo "=========================================="
+          echo
+          echo "Path:"
+          echo "$FINAL"
+          echo
+          ls -lh "$FINAL"
+          echo
+          sha256sum "$FINAL"
+
+      # ------------------------------------------------------------
+      # 15. Generate build information
+      # ------------------------------------------------------------
+      - name: "📝 Generate build info"
+        shell: bash
+        run: |
+          set -eux
+
+          FINAL="$WORKSPACE/download/system.img"
+          INFO="$WORKSPACE/download/system-build-info.txt"
+
+          {
+            echo "HyperOS Treble GSI"
+            echo "=================="
+            echo
+            echo "Target: Pixel 7 / panther"
+            echo "Architecture: arm64"
+            echo "Android target: 16"
+            echo "eUICC framework patch: ${{ inputs.enable_euicc }}"
+            echo
+            echo "Input:"
+            echo "${{ inputs.system_image }}"
+            echo
+            echo "Output:"
+            echo "$FINAL"
+            echo
+            echo "Filesystem:"
+            file "$FINAL"
+            echo
+            echo "Size:"
+            stat -c '%s bytes' "$FINAL"
+            echo
+            echo "SHA256:"
+            sha256sum "$FINAL"
+            echo
+            echo "Important:"
+            echo "The Pixel vendor/vendor_boot/modem/eSIM HAL stack must remain stock."
+            echo "This workflow only modifies the system image."
+          } | tee "$INFO"
+
+      # ------------------------------------------------------------
+      # 16. Do NOT flash anything
+      # ------------------------------------------------------------
+      - name: "🚫 No device flashing"
+        shell: bash
+        run: |
+          echo "Build complete."
+          echo
+          echo "No fastboot commands were executed."
+          echo "No vbmeta partitions were modified."
+          echo "No vendor partitions were modified."
+          echo "No boot/vendor_boot partitions were modified."
+          echo
+          echo "Final image:"
+          echo "$WORKSPACE/download/system.img"
+```
