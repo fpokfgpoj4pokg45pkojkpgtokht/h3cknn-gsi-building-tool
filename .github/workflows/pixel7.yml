@@ -104,7 +104,9 @@ jobs:
 
     runs-on: ubuntu-latest
 
-    timeout-minutes: 9999
+    # GitHub-hosted jobs cannot use 9999 minutes.
+    # 360 minutes is the supported maximum.
+    timeout-minutes: 360
 
     concurrency:
       group: hyperos-panther-gsi
@@ -222,10 +224,10 @@ jobs:
 
       - name: "🚀 Execute HyperOS GSI Port Engine"
         env:
-          INPUT_ROM_URL: ${{ inputs.rom_url }}
-          INPUT_OUTPUT_NAME: ${{ inputs.output_name }}
-          INPUT_ROM_TYPE: ${{ inputs.rom_type }}
-          INPUT_FS_TYPE: ${{ inputs.fs_type }}
+          INPUT_ROM_URL: "${{ inputs.rom_url }}"
+          INPUT_OUTPUT_NAME: "${{ inputs.output_name }}"
+          INPUT_ROM_TYPE: "${{ inputs.rom_type }}"
+          INPUT_FS_TYPE: "${{ inputs.fs_type }}"
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -243,6 +245,7 @@ jobs:
             "$INPUT_ROM_TYPE" \
             "$INPUT_FS_TYPE"
 
+
       # ==========================================================
       # DOWNLOAD PIXEL FACTORY
       # ==========================================================
@@ -250,7 +253,7 @@ jobs:
       - name: "🏭 Download Pixel 7 Panther Factory Package"
         if: ${{ inputs.import_pixel_components }}
         env:
-          FACTORY_URL: ${{ inputs.factory_url }}
+          FACTORY_URL: "${{ inputs.factory_url }}"
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -1931,13 +1934,13 @@ jobs:
       - name: "🧩 Apply Pixel 7 Panther Compatibility"
         if: ${{ inputs.enable_aggressive_patches }}
         env:
-          IMPORT_CONFIGS: ${{ inputs.import_framework_configs && '1' || '0' }}
-          IMPORT_APKS: ${{ inputs.import_missing_apks && '1' || '0' }}
-          VENDOR_REFERENCE: ${{ inputs.aggressive_vendor_reference && '1' || '0' }}
-          ENABLE_BOOT_RESCUE: ${{ inputs.enable_boot_rescue && '1' || '0' }}
-          BOOT_RESCUE_TIMEOUT: ${{ inputs.boot_rescue_timeout }}
-          BOOT_RESCUE_MAX_REBOOTS: ${{ inputs.boot_rescue_max_reboots }}
-          FACTORY_URL: ${{ inputs.factory_url }}
+          IMPORT_CONFIGS: "${{ inputs.import_framework_configs && '1' || '0' }}"
+          IMPORT_APKS: "${{ inputs.import_missing_apks && '1' || '0' }}"
+          VENDOR_REFERENCE: "${{ inputs.aggressive_vendor_reference && '1' || '0' }}"
+          ENABLE_BOOT_RESCUE: "${{ inputs.enable_boot_rescue && '1' || '0' }}"
+          BOOT_RESCUE_TIMEOUT: "${{ inputs.boot_rescue_timeout }}"
+          BOOT_RESCUE_MAX_REBOOTS: "${{ inputs.boot_rescue_max_reboots }}"
+          FACTORY_URL: "${{ inputs.factory_url }}"
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -2075,8 +2078,8 @@ jobs:
 
       - name: "🏗️ Rebuild Patched GSI Image"
         env:
-          OUTPUT_NAME: ${{ inputs.output_name }}
-          FS_TYPE: ${{ inputs.fs_type }}
+          OUTPUT_NAME: "${{ inputs.output_name }}"
+          FS_TYPE: "${{ inputs.fs_type }}"
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -2252,10 +2255,10 @@ jobs:
 
       - name: "🔑 Generate Checksums and Build Metadata"
         env:
-          SOURCE_ROM: ${{ inputs.rom_url }}
-          FACTORY_URL: ${{ inputs.factory_url }}
-          OUTPUT_NAME: ${{ inputs.output_name }}
-          FS_TYPE: ${{ inputs.fs_type }}
+          SOURCE_ROM: "${{ inputs.rom_url }}"
+          FACTORY_URL: "${{ inputs.factory_url }}"
+          OUTPUT_NAME: "${{ inputs.output_name }}"
+          FS_TYPE: "${{ inputs.fs_type }}"
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -2446,7 +2449,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          OUTPUT_NAME: ${{ inputs.output_name }}
+          OUTPUT_NAME: "${{ inputs.output_name }}"
           RELEASE_URL: "${{ github.server_url }}/${{ github.repository }}/releases/tag/v${{ github.run_number }}-${{ github.run_id }}"
         shell: bash
         run: |
@@ -2465,19 +2468,9 @@ jobs:
           name = os.environ["OUTPUT_NAME"]
           release = os.environ["RELEASE_URL"]
 
-          text = f"""<b>{name}</b>
-
-          python3 - <<'PY'
-          from pathlib import Path
-
-          release = (
-              f"{__import__('os').environ.get('GITHUB_SERVER_URL', 'https://github.com')}/"
-              f"{__import__('os').environ.get('GITHUB_REPOSITORY', '')}/"
-              f"releases/tag/v{__import__('os').environ.get('GITHUB_RUN_NUMBER', '')}-"
-              f"{__import__('os').environ.get('GITHUB_RUN_ID', '')}"
-          )
-
           lines = [
+              f"<b>{name}</b>",
+              "",
               "<b>HyperOS → Google Pixel 7 Panther</b>",
               "",
               "Android: 16",
