@@ -1,0 +1,935 @@
+name: "HyperOS GSI + Infinity X (eSIM/lockscreen/kernel) → Pixel 7 flashable zip"
+
+on:
+  workflow_dispatch:
+    inputs:
+      hyperos_url:
+        description: "HyperOS treble GSI ZIP (contains system.img)"
+        required: true
+        type: string
+        default: "https://ixpeering.dl.sourceforge.net/project/mystic-gsi-updates/HyperOS/Hyperos-dijun-16-OS3.0.9.0.WODCNXM-AB-20260114-MysticGSI.zip?viasf=1&fid=58e0467b397a4905&e=1791475984&st=6a-KoRIhsFCxX9xGCZkngw"
+
+      infinityx_url:
+        description: "Infinity X Pixel 7 (panther) OTA ZIP - source of eSIM, kernel, vendor"
+        required: true
+        type: string
+        default: "https://gigenet.dl.sourceforge.net/project/infinity-x/panther/16/gapps/Project_Infinity-X-3.12-panther-26.08.2026-GAPPS-OFFICIAL.zip?viasf=1&fid=1961a3e072f3cc70&e=1791491165&st=nM2J_BqSLjdSjS4Wj5V82A"
+
+      output_name:
+        description: "Output name"
+        required: true
+        type: string
+        default: "HyperOS-GSI-Pixel7"
+
+      fs_type:
+        description: "Filesystem for the repacked system.img"
+        required: true
+        type: choice
+        default: "erofs"
+        options:
+          - "erofs"
+          - "ext4"
+
+      copy_pixel_overlays:
+        description: "Copy Infinity X Pixel/Google/biometric/telephony overlays that HyperOS lacks"
+        required: true
+        type: boolean
+        default: true
+
+      build_firmware_bundle:
+        description: "Add Pixel 7 bootloader + radio from factory image (fastboot bundle only)"
+        required: true
+        type: boolean
+        default: true
+
+      factory_url:
+        description: "Pixel 7 factory image ZIP"
+        required: false
+        type: string
+        default: "https://dl.google.com/dl/android/aosp/panther-bp4a.251205.006-factory-4455f800.zip"
+
+env:
+  W: ${{ github.workspace }}/workspace
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: "Checkout repository"
+        uses: actions/checkout@v5
+
+      - name: "Free disk space"
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+
+      - name: "Install dependencies"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y android-sdk-libsparse-utils e2fsprogs erofs-utils \
+            attr rsync xxd file unzip zip p7zip-full xz-utils zstd jq curl python3 openssl
+          sudo apt-get clean
+
+      - name: "Install payload-dumper-go"
+        run: |
+          set -euo pipefail
+          mkdir -p tools/payload
+          API_JSON="$(curl -fsSL -H 'Accept: application/vnd.github+json' \
+            https://api.github.com/repos/ssut/payload-dumper-go/releases/latest)"
+          ASSET_URL="$(echo "$API_JSON" | jq -r '
+            .assets[] | select(.name | test("linux.*(amd64|x86_64)"; "i")) | .browser_download_url' | head -n1)"
+          [ -n "$ASSET_URL" ] || { echo "::error::no payload-dumper-go linux asset"; exit 1; }
+          curl -fL --retry 5 --retry-all-errors -o tools/payload/pd.tar.gz "$ASSET_URL"
+          tar -xzf tools/payload/pd.tar.gz -C tools/payload
+          BIN="$(find tools/payload -type f -name 'payload-dumper-go' | head -n1)"
+          chmod +x "$BIN"
+          echo "PAYLOAD_DUMPER=$GITHUB_WORKSPACE/$BIN" >> "$GITHUB_ENV"
+
+      # ---------------------------------------------------------------- HyperOS
+      - name: "Download HyperOS GSI and extract system.img"
+        env:
+          HYPEROS_URL: ${{ inputs.hyperos_url }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$W/dl" "$W/gsi" "$W/images/hyperos"
+
+          # NOTE: SourceForge mirror links carry an expiry token (e=...). If this
+          # 403s/404s, grab a fresh link from the project page and re-run.
+          curl -fL --retry 8 --retry-delay 5 --retry-all-errors -A "Mozilla/5.0" \
+            -o "$W/dl/hyperos.zip" "$HYPEROS_URL"
+
+          unzip -q -o "$W/dl/hyperos.zip" -d "$W/gsi"
+          rm -f "$W/dl/hyperos.zip"
+
+          SRC="$(find "$W/gsi" -type f -iname 'system*.img*' | head -n1)"
+          [ -n "$SRC" ] || { echo "::error::No system image found in the GSI zip"; find "$W/gsi" -type f; exit 1; }
+          echo "Found: $SRC"
+
+          case "$SRC" in
+            *.xz)  xz -dc "$SRC" > "$W/images/hyperos/system.img" ;;
+            *.zst) zstd -dc "$SRC" > "$W/images/hyperos/system.img" ;;
+            *.7z)  7z x -y -o"$W/gsi/x" "$SRC" >/dev/null
+                   mv "$(find "$W/gsi/x" -iname '*.img' | head -n1)" "$W/images/hyperos/system.img" ;;
+            *.img) mv "$SRC" "$W/images/hyperos/system.img" ;;
+            *) echo "::error::Unknown image type: $SRC"; exit 1 ;;
+          esac
+          rm -rf "$W/gsi"
+
+          # sparse -> raw
+          if [ "$(dd if="$W/images/hyperos/system.img" bs=1 count=4 2>/dev/null | xxd -p)" = "3aff26ed" ] || \
+             [ "$(dd if="$W/images/hyperos/system.img" bs=1 count=4 2>/dev/null | xxd -p)" = "ed26ff3a" ]; then
+            simg2img "$W/images/hyperos/system.img" "$W/images/hyperos/system.raw"
+            mv "$W/images/hyperos/system.raw" "$W/images/hyperos/system.img"
+          fi
+          ls -lh "$W/images/hyperos"
+          df -h /
+
+      # ------------------------------------------------------------- Infinity X
+      - name: "Download Infinity X OTA and dump Pixel 7 partitions"
+        env:
+          INFINITYX_URL: ${{ inputs.infinityx_url }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$W/dl" "$W/ixota" "$W/images/ix"
+
+          curl -fL --retry 8 --retry-delay 5 --retry-all-errors -A "Mozilla/5.0" \
+            -o "$W/dl/ix.zip" "$INFINITYX_URL"
+          unzip -q -o "$W/dl/ix.zip" payload.bin -d "$W/ixota" || \
+            unzip -q -o "$W/dl/ix.zip" -d "$W/ixota"
+          rm -f "$W/dl/ix.zip"
+          PL="$(find "$W/ixota" -type f -name payload.bin | head -n1)"
+          [ -n "$PL" ] || { echo "::error::No payload.bin in Infinity X zip"; exit 1; }
+
+          # Dump only what we need (one call per partition so a missing one never aborts)
+          for p in system system_ext product \
+                   boot init_boot vendor_boot vendor_kernel_boot dtbo pvmfw \
+                   vendor vendor_dlkm system_dlkm odm odm_dlkm \
+                   vbmeta vbmeta_system vbmeta_vendor; do
+            "$PAYLOAD_DUMPER" -p "$p" -o "$W/images/ix" "$PL" >/dev/null 2>&1 \
+              && echo "dumped $p" || echo "skip   $p (not in payload)"
+          done
+          rm -rf "$W/ixota"
+          ls -lh "$W/images/ix"
+          df -h /
+
+      - name: "Clean and minimally resize Infinity X product.img"
+        shell: sudo -E bash -eo pipefail {0}
+        run: |
+          set -euo pipefail
+
+          IX="$W/images/ix"
+          IMG="$IX/product.img"
+          MNT="$W/mnt/clean_product"
+          TREE="$W/clean_product_tree"
+          CLEAN="$W/images/ix/product-clean.img"
+
+          if [ ! -f "$IMG" ]; then
+            echo "::warning::Infinity X product.img was not found; skipping product cleanup."
+            exit 0
+          fi
+
+          rm -rf "$MNT" "$TREE" "$CLEAN"
+          mkdir -p "$MNT" "$TREE"
+
+          is_sparse() {
+            [ "$(dd if="$1" bs=1 count=4 2>/dev/null | xxd -p)" = "3aff26ed" ]
+          }
+
+          is_erofs() {
+            [ "$(dd if="$1" bs=1 skip=1024 count=4 2>/dev/null | xxd -p)" = "e2e1f5e0" ]
+          }
+
+          # Convert sparse image if necessary.
+          if is_sparse "$IMG"; then
+            echo "== Converting sparse product.img"
+            simg2img "$IMG" "$IMG.raw"
+            mv -f "$IMG.raw" "$IMG"
+          fi
+
+          # --------------------------------------------------------------
+          # Extract product.img
+          # --------------------------------------------------------------
+
+          if is_erofs "$IMG"; then
+            echo "== Extracting EROFS product.img"
+            fsck.erofs --extract="$TREE" "$IMG"
+          else
+            echo "== Mounting ext4 product.img"
+            mount -t ext4 -o loop,ro,noload "$IMG" "$MNT"
+
+            rsync -aHAX --numeric-ids \
+              "$MNT"/ \
+              "$TREE"/
+
+            umount "$MNT"
+          fi
+
+          # --------------------------------------------------------------
+          # Remove obvious optional/bloat packages.
+          #
+          # IMPORTANT:
+          # We deliberately do NOT remove core Google, telephony,
+          # eSIM/eUICC, biometric, SystemUI, Settings, PackageInstaller,
+          # framework, permission-controller, or Pixel launcher components.
+          # --------------------------------------------------------------
+
+          echo "== Scanning product partition for removable bloat"
+
+          remove_path() {
+            local P="$1"
+
+            if [ -e "$P" ] || [ -L "$P" ]; then
+              echo "  - removing: ${P#$TREE/}"
+              rm -rf "$P"
+            fi
+          }
+
+          for BASE in \
+            "$TREE/priv-app" \
+            "$TREE/app"; do
+
+            [ -d "$BASE" ] || continue
+
+            while IFS= read -r -d '' APKDIR; do
+              NAME="$(basename "$APKDIR")"
+
+              case "$NAME" in
+
+                # Google entertainment / media extras
+                YouTubeMusic*|YouTubeTV*|GoogleTV*|GoogleMovies*|\
+                Photos*|GooglePhotos*|GoogleOne*|GoogleHome*|\
+                GoogleKeep*|Keep*|GoogleNews*|GoogleNewsstand*|\
+                GoogleMeet*|Duo*|GoogleDuo*|GoogleContacts*|\
+                GoogleCalendar*|CalendarGoogle*|GoogleDrive*|\
+                GoogleDocs*|GoogleSheets*|GoogleSlides*)
+
+                  remove_path "$APKDIR"
+                  ;;
+
+                # Assistant / consumer extras
+                Velvet*|Assistant*|GoogleAssistant*|\
+                QuickSearchBox*|CarrierServices*|\
+                SpeechServicesByGoogle*)
+
+                  # Keep Speech Services if explicitly needed later.
+                  if [ "$NAME" != "SpeechServicesByGoogle" ]; then
+                    remove_path "$APKDIR"
+                  fi
+                  ;;
+
+                # Common OEM/Pixel optional extras
+                PixelTips*|PixelLiveWallpaper*|\
+                Wallpapers*|Wallpapers2022*|\
+                Recorder*|GoogleRecorder*|\
+                DevicePolicyPrebuilt*)
+
+                  remove_path "$APKDIR"
+                  ;;
+
+              esac
+
+            done < <(find "$BASE" -mindepth 1 -maxdepth 1 -type d -print0)
+          done
+
+          # --------------------------------------------------------------
+          # Remove optional product overlays that are not hardware-critical.
+          # Keep Pixel / biometric / fingerprint / telephony / eSIM overlays.
+          # --------------------------------------------------------------
+
+          OVERLAY="$TREE/overlay"
+
+          if [ -d "$OVERLAY" ]; then
+            while IFS= read -r -d '' O; do
+              NAME="$(basename "$O")"
+
+              if printf '%s\n' "$NAME" | grep -qiE \
+                'pixel|google|biometric|fingerprint|udfps|face|keyguard|telephony|euicc|esim|panther|tensor|permission'; then
+                continue
+              fi
+
+              # Remove obvious optional/consumer overlays.
+              if printf '%s\n' "$NAME" | grep -qiE \
+                'youtube|music|photos|tv|games|news|assistant|weather|calendar|drive|docs|sheets|slides|maps|wallet|shopping'; then
+                remove_path "$O"
+              fi
+
+            done < <(find "$OVERLAY" -mindepth 1 -maxdepth 1 -type f -name '*.apk' -print0)
+          fi
+
+          # --------------------------------------------------------------
+          # Remove obvious optional product configuration files.
+          # Do NOT remove permission XMLs globally.
+          # --------------------------------------------------------------
+
+          if [ -d "$TREE/etc" ]; then
+            find "$TREE/etc" -type f \
+              \( \
+                -iname '*youtube*' \
+                -o -iname '*music*' \
+                -o -iname '*photos*' \
+                -o -iname '*googleone*' \
+                -o -iname '*google_news*' \
+              \) \
+              -print -delete 2>/dev/null || true
+          fi
+
+          # Remove compiled artifacts/cache directories.
+          find "$TREE" -type d \
+            \( \
+              -name oat \
+              -o -name dalvik-cache \
+              -o -name .cache \
+            \) \
+            -prune \
+            -exec rm -rf {} + 2>/dev/null || true
+
+          # Remove empty directories.
+          find "$TREE" -depth -type d -empty -delete 2>/dev/null || true
+
+          echo
+          echo "== Cleaned product tree size =="
+          du -sh "$TREE"
+
+          # --------------------------------------------------------------
+          # Rebuild product.img as small as practical.
+          # --------------------------------------------------------------
+
+          if [ "${{ inputs.fs_type }}" = "erofs" ]; then
+
+            echo "== Creating minimum-size EROFS product image"
+
+            mkfs.erofs \
+              -zlz4hc \
+              -T 1230768000 \
+              "$CLEAN" \
+              "$TREE"
+
+          else
+
+            echo "== Creating minimum-size ext4 product image"
+
+            BYTES="$(du -sb "$TREE" | cut -f1)"
+
+            # Initial size = content + 10% + 16 MiB overhead, rounded up to 4 KiB.
+            SIZE=$(( (BYTES * 110 / 100 + 16 * 1024 * 1024 + 4095) / 4096 * 4096 ))
+
+            truncate -s "$SIZE" "$CLEAN"
+
+            mke2fs \
+              -q \
+              -t ext4 \
+              -b 4096 \
+              -L product \
+              -O ^has_journal \
+              -d "$TREE" \
+              "$CLEAN"
+
+            # Shrink to the filesystem's minimum possible size.
+            e2fsck -fy "$CLEAN" || true
+            resize2fs -M "$CLEAN"
+
+            # Make sure the resulting image is still valid.
+            e2fsck -fy "$CLEAN" >/dev/null
+
+          fi
+
+          # Replace original product image with the cleaned/minimized one.
+          mv -f "$CLEAN" "$IMG"
+
+          rm -rf "$MNT" "$TREE"
+
+          echo
+          echo "=============================================="
+          echo "CLEAN PRODUCT IMAGE"
+          echo "=============================================="
+          ls -lh "$IMG"
+
+          echo
+          echo "Filesystem:"
+          file "$IMG"
+
+          echo
+          echo "SHA256:"
+          sha256sum "$IMG"
+
+      # -------------------------------------------------- unpack HyperOS system
+      - name: "Unpack HyperOS system.img into a writable tree"
+        shell: sudo -E bash -eo pipefail {0}
+        run: |
+          mkdir -p "$W/mnt/hy" "$W/tree"
+
+          is_erofs() { [ "$(dd if="$1" bs=1 skip=1024 count=4 2>/dev/null | xxd -p)" = "e2e1f5e0" ]; }
+
+          IMG="$W/images/hyperos/system.img"
+          if is_erofs "$IMG"; then
+            mount -t erofs -o loop,ro "$IMG" "$W/mnt/hy" || fsck.erofs --extract="$W/mnt/hy" "$IMG"
+          else
+            mount -t ext4 -o loop,ro,noload "$IMG" "$W/mnt/hy"
+          fi
+
+          rsync -aHAX --numeric-ids "$W/mnt/hy"/ "$W/tree"/
+          umount "$W/mnt/hy" 2>/dev/null || true
+          rm -f "$IMG"
+
+          # Locate the real system root (the dir that holds build.prop)
+          if   [ -f "$W/tree/system/build.prop" ]; then SYS="$W/tree/system"
+          elif [ -f "$W/tree/build.prop" ];        then SYS="$W/tree"
+          else SYS="$(dirname "$(find "$W/tree" -maxdepth 3 -name build.prop | head -n1)")"; fi
+          [ -f "$SYS/build.prop" ] || { echo "::error::build.prop not found in GSI"; exit 1; }
+          echo "SYS=$SYS" >> "$GITHUB_ENV"
+          echo "System root: $SYS"
+          grep -E '^ro\.(system\.)?build\.(version\.release|fingerprint|id)=' "$SYS/build.prop" || true
+          df -h /
+
+      # ------------------------------------------- eSIM / lockscreen / Pixel bits
+      - name: "Patch GSI: Infinity X eUICC + lockscreen/biometric + Pixel compat"
+        shell: sudo -E bash -eo pipefail {0}
+        env:
+          COPY_OVERLAYS: ${{ inputs.copy_pixel_overlays }}
+        run: |
+          set -euo pipefail
+
+          IX="$W/images/ix"
+          mkdir -p "$W/mnt/ix_system" "$W/mnt/ix_system_ext" "$W/mnt/ix_product"
+
+          is_erofs() {
+            [ -f "$1" ] &&
+            [ "$(dd if="$1" bs=1 skip=1024 count=4 2>/dev/null | xxd -p)" = "e2e1f5e0" ]
+          }
+
+          is_sparse() {
+            [ -f "$1" ] &&
+            [ "$(dd if="$1" bs=1 count=4 2>/dev/null | xxd -p)" = "3aff26ed" ]
+          }
+
+          normalize_img() {
+            local IMG="$1"
+            [ -f "$IMG" ] || return 0
+            if is_sparse "$IMG"; then
+              local RAW="${IMG}.raw"
+              echo "== converting sparse image: $(basename "$IMG")"
+              simg2img "$IMG" "$RAW"
+              mv -f "$RAW" "$IMG"
+            fi
+          }
+
+          mnt() {
+            local IMG="$1"
+            local DEST="$2"
+
+            [ -f "$IMG" ] || {
+              echo "== missing Infinity X image: $IMG"
+              return 0
+            }
+
+            normalize_img "$IMG"
+            mkdir -p "$DEST"
+
+            if is_erofs "$IMG"; then
+              mount -t erofs -o loop,ro "$IMG" "$DEST"
+            else
+              mount -t ext4 -o loop,ro,noload "$IMG" "$DEST"
+            fi
+          }
+
+          # Mount only the partitions used as component sources.
+          mnt "$IX/system.img"     "$W/mnt/ix_system"
+          mnt "$IX/system_ext.img" "$W/mnt/ix_system_ext"
+          mnt "$IX/product.img"    "$W/mnt/ix_product"
+
+          # GSI layout: system_ext/product live below the extracted system root.
+          declare -A MAP=(
+            ["$W/mnt/ix_system"]="$SYS"
+            ["$W/mnt/ix_system_ext"]="$SYS/system_ext"
+            ["$W/mnt/ix_product"]="$SYS/product"
+          )
+
+          # A GSI may contain product/system_ext as symlinks or placeholder files.
+          # Convert only non-directory destinations to real directories so the
+          # Infinity X files can be merged into the single repacked system image.
+          ensure_merge_dir() {
+            local D="$1"
+
+            if [ -d "$D" ]; then
+              return 0
+            fi
+
+            if [ -L "$D" ] || [ -e "$D" ]; then
+              local BACKUP="${D}.hyperos-original"
+              rm -rf "$BACKUP"
+              mv "$D" "$BACKUP"
+              echo "== moved non-directory GSI entry:"
+              echo "   $D -> $BACKUP"
+            fi
+
+            mkdir -p "$D"
+          }
+
+          ensure_merge_dir "$SYS/system_ext"
+          ensure_merge_dir "$SYS/product"
+
+          # ---- 1. eSIM: remove HyperOS/MIUI eUICC bits, bring in Infinity X's
+          echo "== removing existing eUICC components from GSI"
+          find "$SYS" \( -iname '*euicc*' -o -iname '*esim*' \) \
+            -not -path '*/lib*/*' -prune -exec rm -rf {} + 2>/dev/null || true
+
+          for M in "${!MAP[@]}"; do
+            D="${MAP[$M]}"
+            [ -d "$M" ] || continue
+            ensure_merge_dir "$D"
+            echo "== eUICC from $M -> $D"
+
+            # Copy matching app directories/files without overwriting existing GSI files.
+            find "$M" \( -type d -o -type f \) \
+              \( -iname '*euicc*' -o -iname '*esim*' \) \
+              -not -path '*/lib*/*' \
+              -not -path '*/oat/*' \
+              -print0 |
+            while IFS= read -r -d '' P; do
+              REL="${P#$M/}"
+              DEST="$D/$REL"
+
+              # Do not copy a child that is already present.
+              if [ -e "$DEST" ] || [ -L "$DEST" ]; then
+                continue
+              fi
+
+              mkdir -p "$(dirname "$DEST")"
+              cp -a "$P" "$DEST"
+              echo "  + $REL"
+            done
+
+            # Google privapp permission whitelists.
+            # Use an ix- prefix so HyperOS files are never overwritten.
+            for X in \
+              "$M"/etc/permissions/privapp-permissions-google*.xml \
+              "$M"/etc/permissions/com.google.android.euicc*.xml \
+              "$M"/etc/sysconfig/*google*euicc*.xml; do
+              [ -f "$X" ] || continue
+              SUB="$(dirname "${X#$M/}")"
+              mkdir -p "$D/$SUB"
+              cp -a "$X" "$D/$SUB/ix-$(basename "$X")"
+              echo "  + $SUB/ix-$(basename "$X")"
+            done
+          done
+
+          # ---- 2. Pixel framework/biometric/telephony overlays HyperOS lacks
+          if [ "$COPY_OVERLAYS" = "true" ] && [ -d "$W/mnt/ix_product/overlay" ]; then
+            ensure_merge_dir "$SYS/product/overlay"
+
+            find "$W/mnt/ix_product/overlay" -maxdepth 1 -type f -name '*.apk' -print0 |
+              while IFS= read -r -d '' O; do
+                B="$(basename "$O")"
+
+                if printf '%s\n' "$B" | grep -qiE \
+                    'pixel|google|biometric|fingerprint|udfps|face|keyguard|telephony|panther|tensor'; then
+                  if [ ! -e "$SYS/product/overlay/$B" ] && [ ! -L "$SYS/product/overlay/$B" ]; then
+                    cp -a "$O" "$SYS/product/overlay/$B"
+                    echo "  + overlay $B"
+                  fi
+                fi
+              done
+          fi
+
+          # ---- 3. Biometric / lockscreen / telephony feature permission XMLs
+          for M in "$W/mnt/ix_product" "$W/mnt/ix_system_ext" "$W/mnt/ix_system"; do
+            D="${MAP[$M]}"
+            [ -d "$M" ] || continue
+            ensure_merge_dir "$D"
+
+            for X in \
+              "$M"/etc/permissions/android.hardware.{fingerprint,biometrics.face,telephony.euicc,telephony.subscription,telephony.data,telephony.ims,security.keystore,hardware_keystore,strongbox_keystore,device_unique_attestation}*.xml \
+              "$M"/etc/permissions/android.software.{device_id_attestation,secure_lock_screen,verified_boot,credentials}*.xml; do
+              [ -f "$X" ] || continue
+
+              SUB="$(dirname "${X#$M/}")"
+              DEST="$D/$SUB/$(basename "$X")"
+              mkdir -p "$(dirname "$DEST")"
+
+              if [ ! -e "$DEST" ] && [ ! -L "$DEST" ]; then
+                cp -a "$X" "$DEST"
+                echo "  + feature $(basename "$X")"
+              fi
+            done
+          done
+
+          # ---- 4. Build props for Pixel 7 compatibility
+          cat >> "$SYS/build.prop" <<'PROPS'
+
+          # --- Pixel 7 (panther) port additions ---
+          # eSIM / dual-SIM (physical + eUICC)
+          persist.radio.multisim.config=dsds
+          ro.telephony.default_network=33,33
+          # Don't bootloop on privapp perms from the imported Google/eUICC apps
+          ro.control_privapp_permissions=log
+          # Keep keyguard/biometric services on the Pixel vendor HALs
+          ro.boot.hypervisor.vm.supported=true
+          PROPS
+
+          # ---- 5. Stale compiled artifacts - regenerate on first boot
+          find "$SYS" -type d \( -name oat -o -name dalvik-cache \) \
+            -prune -exec rm -rf {} + 2>/dev/null || true
+
+          for M in "$W/mnt/ix_system" "$W/mnt/ix_system_ext" "$W/mnt/ix_product"; do
+            umount "$M" 2>/dev/null || true
+          done
+
+          # These are source images only; the patched contents are now in $W/tree.
+          rm -f "$IX/system.img" "$IX/system_ext.img" "$IX/product.img"
+          ls -ld "$SYS" "$SYS/system_ext" "$SYS/product"
+
+      # --------------------------------------------------------------- repack
+      - name: "Repack patched system.img"
+        shell: sudo -E bash -eo pipefail {0}
+        env:
+          FS_TYPE: ${{ inputs.fs_type }}
+        run: |
+          set -euo pipefail
+          OUT="$W/final_images"
+          mkdir -p "$OUT"
+          TREE="$W/tree"
+
+          if [ "$FS_TYPE" = "erofs" ]; then
+            mkfs.erofs -zlz4hc -T 1230768000 "$OUT/system.img" "$TREE"
+          else
+            BYTES=$(du -sb "$TREE" | cut -f1)
+            SIZE=$(( BYTES * 112 / 100 / 4096 * 4096 + 64*1024*1024 ))
+            truncate -s "$SIZE" "$OUT/system.img"
+            mke2fs -q -t ext4 -b 4096 -L system -O ^has_journal -d "$TREE" "$OUT/system.img"
+            e2fsck -fy "$OUT/system.img" || true
+            resize2fs -M "$OUT/system.img" || true
+          fi
+          rm -rf "$TREE"
+          ls -lh "$OUT"
+
+          # ---- Kernel stuff + Pixel vendor from Infinity X
+          IX="$W/images/ix"
+          for p in boot init_boot vendor_boot vendor_kernel_boot dtbo pvmfw \
+                   vendor vendor_dlkm system_dlkm odm odm_dlkm \
+                   vbmeta vbmeta_system vbmeta_vendor; do
+            if [ -f "$IX/$p.img" ]; then
+              mv "$IX/$p.img" "$OUT/$p.img"
+            fi
+          done
+
+          # Disable AVB verification inside the vbmeta images (flags = 3), required for a GSI
+          for v in vbmeta vbmeta_system vbmeta_vendor; do
+            [ -f "$OUT/$v.img" ] || continue
+            printf '\x03' | dd of="$OUT/$v.img" bs=1 seek=123 count=1 conv=notrunc 2>/dev/null
+            echo "patched AVB flags in $v.img"
+          done
+          chown -R "${SUDO_UID:-0}:${SUDO_GID:-0}" "$W/final_images" 2>/dev/null || true
+          ls -lh "$OUT"
+
+      - name: "Fetch bootloader + radio from Pixel 7 factory image"
+        if: ${{ inputs.build_firmware_bundle }}
+        env:
+          FACTORY_URL: ${{ inputs.factory_url }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$W/fw" "$W/dl"
+          curl -fL --retry 8 --retry-delay 5 --retry-all-errors \
+            -o "$W/dl/factory.zip" "$FACTORY_URL"
+          unzip -j -o "$W/dl/factory.zip" '*/bootloader-*.img' '*/radio-*.img' -d "$W/fw"
+          rm -f "$W/dl/factory.zip"
+          ls -lh "$W/fw"
+
+      - name: "Build flashable packages and sign them"
+        env:
+          OUTPUT_NAME: ${{ inputs.output_name }}
+        run: |
+          set -euo pipefail
+
+          OUT="$GITHUB_WORKSPACE/out"
+          IMGS="$W/final_images"
+
+          rm -rf "$OUT" "$W/pkg_ota" "$W/pkg_fb"
+          mkdir -p \
+            "$OUT" \
+            "$W/pkg_ota/images" \
+            "$W/pkg_fb/images" \
+            "$W/pkg_fb/fw"
+
+          # The private key must never outlive this step, even on failure.
+          trap 'rm -f "$W/ota-private.pem"' EXIT
+
+          # ==============================================================
+          # Generate a fresh OTA signing key automatically
+          # ==============================================================
+
+          echo "== Generating OTA RSA-4096 signing key"
+
+          openssl genrsa -out "$W/ota-private.pem" 4096
+          openssl rsa -in "$W/ota-private.pem" -pubout -out "$OUT/ota-public-key.pem"
+
+          PUB_SHA256="$(openssl pkey -pubin -in "$OUT/ota-public-key.pem" -outform DER | sha256sum | cut -d' ' -f1)"
+          echo "$PUB_SHA256" > "$OUT/ota-public-key.sha256"
+          echo "Public key SHA-256: $PUB_SHA256"
+
+          # ==============================================================
+          # Fastboot package
+          # ==============================================================
+
+          echo "== Copying images into fastboot package"
+          cp "$IMGS"/*.img "$W/pkg_fb/images/"
+
+          if [ -d "$W/fw" ]; then
+            cp "$W"/fw/*.img "$W/pkg_fb/fw/" 2>/dev/null || true
+          fi
+
+          cat > "$W/pkg_fb/flash-all.sh" <<'FLASHEOF'
+          #!/usr/bin/env bash
+          set -eu
+          cd "$(dirname "$0")"
+
+          FB="${FASTBOOT:-fastboot}"
+          command -v "$FB" >/dev/null 2>&1 || { echo "fastboot not found in PATH"; exit 1; }
+
+          echo "=============================================="
+          echo " HyperOS GSI + Infinity X -> Pixel 7 (panther)"
+          echo "=============================================="
+          echo
+          echo "Requirements: unlocked bootloader, device in bootloader mode."
+          echo "This flashes boot/vendor/system partitions on the ACTIVE slot."
+          echo
+          read -r -p "Type YES to continue: " ANSWER
+          [ "$ANSWER" = "YES" ] || { echo "Aborted."; exit 1; }
+
+          flash_if_present() {
+            local PART="$1" FILE="$2"
+            shift 2
+            if [ -f "$FILE" ]; then
+              echo
+              echo "== Flashing $PART"
+              "$FB" "$@" flash "$PART" "$FILE"
+            else
+              echo "-- $FILE not found; skipping $PART"
+            fi
+          }
+
+          # --------------------------------------------------------------
+          # Bootloader / radio (optional bundle)
+          # --------------------------------------------------------------
+
+          BL="$(ls fw/bootloader-*.img 2>/dev/null | head -n1 || true)"
+          RADIO="$(ls fw/radio-*.img 2>/dev/null | head -n1 || true)"
+
+          if [ -n "$BL" ]; then
+            echo "== Flashing bootloader: $BL"
+            "$FB" flash bootloader "$BL"
+            "$FB" reboot bootloader
+            sleep 5
+          fi
+
+          if [ -n "$RADIO" ]; then
+            echo "== Flashing radio: $RADIO"
+            "$FB" flash radio "$RADIO"
+            "$FB" reboot bootloader
+            sleep 5
+          fi
+
+          # --------------------------------------------------------------
+          # Physical partitions (flashed from the bootloader)
+          # --------------------------------------------------------------
+
+          flash_if_present boot images/boot.img
+          flash_if_present init_boot images/init_boot.img
+          flash_if_present vendor_boot images/vendor_boot.img
+          flash_if_present vendor_kernel_boot images/vendor_kernel_boot.img
+          flash_if_present dtbo images/dtbo.img
+          flash_if_present pvmfw images/pvmfw.img
+
+          # --------------------------------------------------------------
+          # AVB metadata (verification disabled; required for a GSI)
+          # --------------------------------------------------------------
+
+          flash_if_present vbmeta images/vbmeta.img --disable-verity --disable-verification
+          flash_if_present vbmeta_system images/vbmeta_system.img --disable-verity --disable-verification
+          flash_if_present vbmeta_vendor images/vbmeta_vendor.img --disable-verity --disable-verification
+
+          # --------------------------------------------------------------
+          # Logical (dynamic) partitions must be flashed from fastbootd
+          # --------------------------------------------------------------
+
+          echo
+          echo "=============================================="
+          echo " Rebooting to fastbootd"
+          echo "=============================================="
+
+          "$FB" reboot fastboot
+          sleep 8
+
+          for _ in $(seq 1 30); do
+            if "$FB" getvar is-userspace 2>&1 | grep -qi 'is-userspace: *yes'; then
+              break
+            fi
+            sleep 1
+          done
+
+          "$FB" getvar is-userspace 2>&1 || true
+          "$FB" getvar current-slot 2>&1 || true
+
+          flash_if_present system images/system.img
+          flash_if_present system_ext images/system_ext.img
+          flash_if_present product images/product.img
+          flash_if_present vendor images/vendor.img
+          flash_if_present vendor_dlkm images/vendor_dlkm.img
+          flash_if_present system_dlkm images/system_dlkm.img
+          flash_if_present odm images/odm.img
+          flash_if_present odm_dlkm images/odm_dlkm.img
+
+          # --------------------------------------------------------------
+          # Userdata wipe (recommended when switching ROMs)
+          # --------------------------------------------------------------
+
+          echo
+          read -r -p "Wipe userdata now? Type WIPE to wipe, anything else to skip: " WIPE
+          if [ "$WIPE" = "WIPE" ]; then
+            "$FB" -w
+          else
+            echo "-- Skipping wipe. If the device bootloops, wipe data and retry."
+          fi
+
+          echo
+          echo "=============================================="
+          echo " Flashing complete - rebooting"
+          echo "=============================================="
+          "$FB" reboot
+
+          echo "The first boot may take several minutes. Do NOT interrupt it."
+          FLASHEOF
+
+          chmod +x "$W/pkg_fb/flash-all.sh"
+
+          # ==============================================================
+          # OTA package (images + public signing info)
+          # ==============================================================
+
+          echo "== Copying images into OTA package"
+          cp "$IMGS"/*.img "$W/pkg_ota/images/"
+          cp "$OUT/ota-public-key.pem" "$W/pkg_ota/ota-public-key.pem"
+          cp "$OUT/ota-public-key.sha256" "$W/pkg_ota/ota-public-key.sha256"
+
+          cat > "$W/pkg_ota/OTA-METADATA.txt" <<METAEOF
+          Package: $OUTPUT_NAME
+          Device: Pixel 7 (panther)
+          Base: HyperOS Android 16 GSI
+          Components: Infinity X Pixel 7
+          OTA signing algorithm: RSA-4096
+          OTA public-key SHA-256: $PUB_SHA256
+
+          IMPORTANT:
+          This signing key was generated automatically during this build.
+          The private key is NOT included in this package.
+          METAEOF
+
+          # ==============================================================
+          # Create ZIPs
+          # ==============================================================
+
+          echo "== Creating fastboot package =="
+          (cd "$W/pkg_fb" && zip -r -9 "$OUT/${OUTPUT_NAME}-fastboot.zip" .)
+
+          echo "== Creating OTA package =="
+          (cd "$W/pkg_ota" && zip -r -9 "$OUT/${OUTPUT_NAME}-OTA.zip" .)
+
+          # ==============================================================
+          # Sign the ZIPs and verify the signatures
+          # ==============================================================
+
+          echo "== Signing packages =="
+          for Z in "$OUT"/*.zip; do
+            openssl dgst -sha256 -sign "$W/ota-private.pem" -out "$Z.sig" "$Z"
+            openssl dgst -sha256 -verify "$OUT/ota-public-key.pem" -signature "$Z.sig" "$Z"
+          done
+
+          # ==============================================================
+          # Generate SHA-256 checksums
+          # ==============================================================
+
+          echo "== Generating SHA-256 checksums =="
+          (
+            cd "$OUT"
+            sha256sum *.zip *.sig ota-public-key.pem ota-public-key.sha256 > SHA256SUMS.txt
+          )
+
+          # ==============================================================
+          # Remove private OTA signing key
+          # ==============================================================
+
+          rm -f "$W/ota-private.pem"
+
+          if [ -e "$W/ota-private.pem" ]; then
+            echo "::error::Failed to remove OTA private key"
+            exit 1
+          fi
+
+          echo "== OTA private key removed from runner workspace =="
+
+          # ==============================================================
+          # Final verification
+          # ==============================================================
+
+          echo
+          echo "=============================================="
+          echo "             BUILD COMPLETE"
+          echo "=============================================="
+          echo
+          echo "Output files:"
+          ls -lh "$OUT"
+          echo
+          cat "$OUT/SHA256SUMS.txt"
+
+      - name: "Upload build artifacts"
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.output_name }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
