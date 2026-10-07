@@ -51,7 +51,8 @@ jobs:
     timeout-minutes: 240
     permissions:
       contents: write
- steps:
+      
+  steps:
       - name: "Checkout repository"
         uses: actions/checkout@v5
 
