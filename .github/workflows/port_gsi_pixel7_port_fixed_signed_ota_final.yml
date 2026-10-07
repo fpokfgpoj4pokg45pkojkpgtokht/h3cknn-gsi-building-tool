@@ -809,22 +809,190 @@ jobs:
           # Reboot bootloader after firmware
           # --------------------------------------------------------------
 
-          "$FB" reboot bootloader
-          sleep 3
+          cat > "$W/pkg_fb/flash-all.sh" <<'EOF'
+          #!/usr/bin/env bash
+
+          # ==============================================================
+          # Pixel 7 (panther)
+          # HyperOS GSI + Infinity X kernel/vendor/eSIM
+          #
+          # Bootloader MUST be unlocked.
+          #
+          # Requires:
+          #   - fastboot
+          #   - Pixel 7 in bootloader/fastboot mode
+          #
+          # This script intentionally does NOT erase userdata.
+          # ==============================================================
+
+          set -euo pipefail
+
+          cd "$(dirname "$0")"
+
+          FB="${FASTBOOT:-fastboot}"
+
+          echo
+          echo "=============================================="
+          echo " Pixel 7 Panther Flash Bundle"
+          echo " HyperOS GSI + Infinity X"
+          echo "=============================================="
+          echo
 
           # --------------------------------------------------------------
-          # Flash available partitions
+          # Check fastboot
+          # --------------------------------------------------------------
+
+          if ! command -v "$FB" >/dev/null 2>&1; then
+            echo "::error::fastboot was not found."
+            echo "Install Android platform-tools and make sure fastboot is in PATH."
+            exit 1
+          fi
+
+          # --------------------------------------------------------------
+          # Check device
+          # --------------------------------------------------------------
+
+          echo "== Checking for Pixel 7 =="
+
+          DEVICES="$("$FB" devices)"
+
+          if [ -z "$DEVICES" ]; then
+            echo "::error::No fastboot device detected."
+            echo
+            echo "Put the Pixel 7 into bootloader mode and run:"
+            echo "  fastboot devices"
+            exit 1
+          fi
+
+          echo "$DEVICES"
+          echo
+
+          # --------------------------------------------------------------
+          # Display bootloader information
+          # --------------------------------------------------------------
+
+          echo "== Device information =="
+
+          "$FB" getvar product 2>&1 || true
+          "$FB" getvar current-slot 2>&1 || true
+          "$FB" getvar unlocked 2>&1 || true
+          "$FB" getvar is-userspace 2>&1 || true
+
+          echo
+
+          # --------------------------------------------------------------
+          # Require unlocked bootloader
+          # --------------------------------------------------------------
+
+          UNLOCKED="$("$FB" getvar unlocked 2>&1 || true)"
+
+          if ! printf '%s\n' "$UNLOCKED" | grep -qiE \
+            'unlocked: yes|unlocked yes|Device unlocked: true'; then
+
+            echo "::warning::Fastboot did not report an unlocked bootloader."
+            echo "::warning::Flashing may fail if the bootloader is locked."
+            echo
+          fi
+
+          # --------------------------------------------------------------
+          # Helper
           # --------------------------------------------------------------
 
           flash_if_present() {
             local PART="$1"
             local FILE="$2"
 
-            if [ -f "$FILE" ]; then
-              echo "== Flashing $PART =="
-              "$FB" flash "$PART" "$FILE"
+            if [ ! -f "$FILE" ]; then
+              echo "-- Skipping $PART"
+              echo "   File not present: $FILE"
+              return 0
             fi
+
+            echo
+            echo "== Flashing $PART =="
+            echo "   Image: $FILE"
+
+            "$FB" flash "$PART" "$FILE"
           }
+
+          # --------------------------------------------------------------
+          # Reboot bootloader before flashing
+          # --------------------------------------------------------------
+
+          echo "== Rebooting bootloader =="
+
+          "$FB" reboot bootloader
+
+          sleep 5
+
+          # Wait for fastboot to return.
+          for _ in $(seq 1 30); do
+            if "$FB" devices | grep -q .; then
+              break
+            fi
+
+            sleep 1
+          done
+
+          echo
+          echo "== Fastboot device =="
+
+          "$FB" devices
+
+          # --------------------------------------------------------------
+          # Flash bootloader
+          # --------------------------------------------------------------
+
+          BOOTLOADER="$(find fw -maxdepth 1 -type f \
+            \( -iname 'bootloader-*.img' -o -iname 'bootloader*.img' \) \
+            | head -n1 || true)"
+
+          if [ -n "$BOOTLOADER" ]; then
+            echo
+            echo "== Flashing Pixel 7 bootloader =="
+            "$FB" flash bootloader "$BOOTLOADER"
+
+            echo "== Rebooting bootloader after bootloader flash =="
+
+            "$FB" reboot bootloader
+            sleep 5
+          else
+            echo "-- No bootloader image found; skipping bootloader."
+          fi
+
+          # --------------------------------------------------------------
+          # Flash radio
+          # --------------------------------------------------------------
+
+          RADIO="$(find fw -maxdepth 1 -type f \
+            \( -iname 'radio-*.img' -o -iname 'radio*.img' \) \
+            | head -n1 || true)"
+
+          if [ -n "$RADIO" ]; then
+            echo
+            echo "== Flashing Pixel 7 radio =="
+            "$FB" flash radio "$RADIO"
+
+            echo "== Rebooting bootloader after radio flash =="
+
+            "$FB" reboot bootloader
+            sleep 5
+          else
+            echo "-- No radio image found; skipping radio."
+          fi
+
+          # --------------------------------------------------------------
+          # Refresh fastboot variables
+          # --------------------------------------------------------------
+
+          echo
+          echo "== Current slot =="
+
+          "$FB" getvar current-slot 2>&1 || true
+
+          # --------------------------------------------------------------
+          # Flash boot-related partitions
+          # --------------------------------------------------------------
 
           flash_if_present boot images/boot.img
           flash_if_present init_boot images/init_boot.img
@@ -833,31 +1001,135 @@ jobs:
           flash_if_present dtbo images/dtbo.img
           flash_if_present pvmfw images/pvmfw.img
 
+          # --------------------------------------------------------------
+          # Flash kernel module partitions
+          # --------------------------------------------------------------
+
           flash_if_present vendor_dlkm images/vendor_dlkm.img
           flash_if_present system_dlkm images/system_dlkm.img
-
-          flash_if_present odm images/odm.img
           flash_if_present odm_dlkm images/odm_dlkm.img
 
-          echo
-          echo "== System image =="
-          echo "The generated system.img is intended for the Pixel 7 GSI setup."
-          echo
+          # --------------------------------------------------------------
+          # Flash device-specific partitions
+          # --------------------------------------------------------------
+
+          flash_if_present odm images/odm.img
+
+          # --------------------------------------------------------------
+          # AVB metadata
+          # --------------------------------------------------------------
+
+          flash_if_present vbmeta images/vbmeta.img
+          flash_if_present vbmeta_system images/vbmeta_system.img
+          flash_if_present vbmeta_vendor images/vbmeta_vendor.img
+
+          # --------------------------------------------------------------
+          # Vendor
+          # --------------------------------------------------------------
+
+          flash_if_present vendor images/vendor.img
+
+          # --------------------------------------------------------------
+          # System image
+          #
+          # Pixel 7 uses dynamic partitions. The system image should be
+          # flashed from fastbootd rather than blindly flashing it from
+          # the bootloader.
+          # --------------------------------------------------------------
 
           if [ -f images/system.img ]; then
-            "$FB" reboot fastboot || true
-            sleep 3
+
+            echo
+            echo "=============================================="
+            echo " Preparing fastbootd"
+            echo "=============================================="
+            echo
+
+            "$FB" reboot fastboot
+
+            sleep 8
+
+            # Wait for fastbootd.
+            for _ in $(seq 1 30); do
+              if "$FB" getvar is-userspace 2>&1 | grep -qi \
+                'is-userspace: yes'; then
+                break
+              fi
+
+              sleep 1
+            done
+
+            echo
+            echo "== Fastbootd status =="
 
             "$FB" getvar is-userspace 2>&1 || true
+            "$FB" getvar current-slot 2>&1 || true
 
-            echo "== Flashing system =="
+            echo
+            echo "== Flashing generated HyperOS system.img =="
+
             "$FB" flash system images/system.img
+
+          else
+            echo
+            echo "-- No system.img found; skipping system flash."
           fi
 
+          # --------------------------------------------------------------
+          # Product
+          # --------------------------------------------------------------
+
+          if [ -f images/product.img ]; then
+
+            echo
+            echo "== Flashing cleaned product.img =="
+
+            "$FB" flash product images/product.img
+
+          else
+            echo
+            echo "-- No product.img found; skipping product."
+          fi
+
+          # --------------------------------------------------------------
+          # System_ext
+          # --------------------------------------------------------------
+
+          if [ -f images/system_ext.img ]; then
+
+            echo
+            echo "== Flashing system_ext.img =="
+
+            "$FB" flash system_ext images/system_ext.img
+
+          else
+            echo
+            echo "-- No system_ext.img found; skipping system_ext."
+          fi
+
+          # --------------------------------------------------------------
+          # Reboot to Android
+          # --------------------------------------------------------------
+
           echo
-          echo "== Flash complete =="
-          echo "Rebooting..."
+          echo "=============================================="
+          echo " Flashing complete"
+          echo "=============================================="
+          echo
+
+          echo "Rebooting Pixel 7..."
+
           "$FB" reboot
+
+          echo
+          echo "=============================================="
+          echo " Pixel 7 reboot command sent"
+          echo "=============================================="
+          echo
+          echo "The first boot may take several minutes."
+          echo "Do NOT interrupt the device during the first boot."
+          echo
+
           EOF
 
           chmod +x "$W/pkg_fb/flash-all.sh"
@@ -895,30 +1167,38 @@ jobs:
           EOF
 
           # ==============================================================
-          # Create ZIP packages
+          # Create fastboot ZIP
           # ==============================================================
 
-          echo "== Creating fastboot package"
+          echo "== Creating fastboot package =="
 
           (
             cd "$W/pkg_fb"
+
             zip -r -9 \
               "$OUT/${OUTPUT_NAME}-fastboot.zip" \
               .
           )
 
-          echo "== Creating OTA package"
+          # ==============================================================
+          # Create OTA ZIP
+          # ==============================================================
+
+          echo "== Creating OTA package =="
 
           (
             cd "$W/pkg_ota"
+
             zip -r -9 \
               "$OUT/${OUTPUT_NAME}-OTA.zip" \
               .
           )
 
           # ==============================================================
-          # Generate checksums
+          # Generate SHA-256 checksums
           # ==============================================================
+
+          echo "== Generating SHA-256 checksums =="
 
           (
             cd "$OUT"
@@ -931,23 +1211,30 @@ jobs:
           )
 
           # ==============================================================
-          # Remove private key from workspace
+          # Remove private OTA signing key
+          #
+          # The private key must NEVER be included in the output ZIPs.
           # ==============================================================
-
+          
           rm -f "$W/ota-private.pem"
 
+          if [ -e "$W/ota-private.pem" ]; then
+            echo "::error::Failed to remove OTA private key"
+            exit 1
+          fi
+
+          echo "== OTA private key removed from runner workspace =="
+
+          # ==============================================================
+          # Final verification
+          # ==============================================================
+
           echo
           echo "=============================================="
-          echo "BUILD COMPLETE"
+          echo "             BUILD COMPLETE"
           echo "=============================================="
           echo
 
+          echo "Output files:"
           ls -lh "$OUT"
 
-          echo
-          echo "OTA public key fingerprint:"
-          cat "$OUT/ota-public-key.sha256"
-
-          echo
-          echo "SHA256:"
-          cat "$OUT/SHA256SUMS.txt"
