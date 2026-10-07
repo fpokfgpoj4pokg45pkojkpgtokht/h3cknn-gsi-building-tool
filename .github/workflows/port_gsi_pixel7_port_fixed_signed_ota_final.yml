@@ -47,7 +47,7 @@ on:
         required: false
         type: string
         default: "https://dl.google.com/dl/android/aosp/panther-bp4a.251205.006-factory-4455f800.zip"
-
+        
 env:
   W: ${{ github.workspace }}/workspace
 
@@ -56,9 +56,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 240
     
-    permissions:
+  permissions:
       contents: write
-    steps:
+  
+  steps:
       - name: "Checkout repository"
         uses: actions/checkout@v5
 
