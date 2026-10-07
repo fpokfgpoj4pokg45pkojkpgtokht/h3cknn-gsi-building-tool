@@ -8,16 +8,19 @@ on:
         required: true
         type: string
         default: "https://ixpeering.dl.sourceforge.net/project/mystic-gsi-updates/HyperOS/Hyperos-dijun-16-OS3.0.9.0.WODCNXM-AB-20260114-MysticGSI.zip?viasf=1&fid=58e0467b397a4905&e=1791475984&st=6a-KoRIhsFCxX9xGCZkngw"
+
       infinityx_url:
         description: "Infinity X Pixel 7 (panther) OTA ZIP - source of eSIM, kernel, vendor"
         required: true
         type: string
         default: "https://gigenet.dl.sourceforge.net/project/infinity-x/panther/16/gapps/Project_Infinity-X-3.12-panther-26.08.2026-GAPPS-OFFICIAL.zip?viasf=1&fid=1961a3e072f3cc70&e=1791491165&st=nM2J_BqSLjdSjS4Wj5V82A"
+
       output_name:
         description: "Output name"
         required: true
         type: string
         default: "HyperOS-GSI-Pixel7"
+
       fs_type:
         description: "Filesystem for the repacked system.img"
         required: true
@@ -26,16 +29,19 @@ on:
         options:
           - "erofs"
           - "ext4"
+
       copy_pixel_overlays:
         description: "Copy Infinity X Pixel/Google/biometric/telephony overlays that HyperOS lacks"
         required: true
         type: boolean
         default: true
+
       build_firmware_bundle:
         description: "Add Pixel 7 bootloader + radio from factory image (fastboot bundle only)"
         required: true
         type: boolean
         default: true
+
       factory_url:
         description: "Pixel 7 factory image ZIP"
         required: false
