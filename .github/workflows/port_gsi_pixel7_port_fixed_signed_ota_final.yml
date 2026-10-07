@@ -150,6 +150,258 @@ jobs:
           ls -lh "$W/images/ix"
           df -h /
 
+          
+       - name: "Clean and minimally resize Infinity X product.img"
+        shell: sudo -E bash -eo pipefail {0}
+        run: |
+          set -euo pipefail
+
+          IX="$W/images/ix"
+          IMG="$IX/product.img"
+          MNT="$W/mnt/clean_product"
+          TREE="$W/clean_product_tree"
+          CLEAN="$W/images/ix/product-clean.img"
+
+          if [ ! -f "$IMG" ]; then
+            echo "::warning::Infinity X product.img was not found; skipping product cleanup."
+            exit 0
+          fi
+
+          rm -rf "$MNT" "$TREE" "$CLEAN"
+          mkdir -p "$MNT" "$TREE"
+
+          is_sparse() {
+            [ "$(dd if="$1" bs=1 count=4 2>/dev/null | xxd -p)" = "3aff26ed" ]
+          }
+
+          is_erofs() {
+            [ "$(dd if="$1" bs=1 skip=1024 count=4 2>/dev/null | xxd -p)" = "e2e1f5e0" ]
+          }
+
+          # Convert sparse image if necessary.
+          if is_sparse "$IMG"; then
+            echo "== Converting sparse product.img"
+            simg2img "$IMG" "$IMG.raw"
+            mv -f "$IMG.raw" "$IMG"
+          fi
+
+          # --------------------------------------------------------------
+          # Extract product.img
+          # --------------------------------------------------------------
+
+          if is_erofs "$IMG"; then
+            echo "== Extracting EROFS product.img"
+            fsck.erofs --extract="$TREE" "$IMG"
+          else
+            echo "== Mounting ext4 product.img"
+            mount -t ext4 -o loop,ro,noload "$IMG" "$MNT"
+
+            rsync -aHAX --numeric-ids \
+              "$MNT"/ \
+              "$TREE"/
+
+            umount "$MNT"
+          fi
+
+          # --------------------------------------------------------------
+          # Remove obvious optional/bloat packages.
+          #
+          # IMPORTANT:
+          # We deliberately do NOT remove core Google, telephony,
+          # eSIM/eUICC, biometric, SystemUI, Settings, PackageInstaller,
+          # framework, permission-controller, or Pixel launcher components.
+          # --------------------------------------------------------------
+
+          echo "== Scanning product partition for removable bloat"
+
+          remove_path() {
+            local P="$1"
+
+            if [ -e "$P" ] || [ -L "$P" ]; then
+              echo "  - removing: ${P#$TREE/}"
+              rm -rf "$P"
+            fi
+          }
+
+          # Common optional Google applications that are not required for
+          # Android boot or Pixel hardware functionality.
+          for BASE in \
+            "$TREE/priv-app" \
+            "$TREE/app"; do
+
+            [ -d "$BASE" ] || continue
+
+            while IFS= read -r -d '' APKDIR; do
+              NAME="$(basename "$APKDIR")"
+
+              case "$NAME" in
+
+                # Google entertainment / media extras
+                YouTubeMusic*|YouTubeTV*|GoogleTV*|GoogleMovies*|\
+                Photos*|GooglePhotos*|GoogleOne*|GoogleHome*|\
+                GoogleKeep*|Keep*|GoogleNews*|GoogleNewsstand*|\
+                GoogleMeet*|Duo*|GoogleDuo*|GoogleContacts*|\
+                GoogleCalendar*|CalendarGoogle*|GoogleDrive*|\
+                GoogleDocs*|GoogleSheets*|GoogleSlides*)
+
+                  remove_path "$APKDIR"
+                  ;;
+
+                # Assistant / consumer extras
+                Velvet*|Assistant*|GoogleAssistant*|\
+                QuickSearchBox*|CarrierServices*|\
+                SpeechServicesByGoogle*)
+
+                  # Keep Speech Services if explicitly needed later.
+                  if [ "$NAME" != "SpeechServicesByGoogle" ]; then
+                    remove_path "$APKDIR"
+                  fi
+                  ;;
+
+                # Common OEM/Pixel optional extras
+                PixelTips*|PixelLiveWallpaper*|\
+                Wallpapers*|Wallpapers2022*|\
+                Recorder*|GoogleRecorder*|\
+                DevicePolicyPrebuilt*)
+
+                  remove_path "$APKDIR"
+                  ;;
+
+              esac
+
+            done < <(find "$BASE" -mindepth 1 -maxdepth 1 -type d -print0)
+          done
+
+          # --------------------------------------------------------------
+          # Remove optional product overlays that are not hardware-critical.
+          #
+          # Keep Pixel / biometric / fingerprint / telephony / eSIM overlays.
+          # --------------------------------------------------------------
+
+          OVERLAY="$TREE/overlay"
+
+          if [ -d "$OVERLAY" ]; then
+            while IFS= read -r -d '' O; do
+              NAME="$(basename "$O")"
+
+              if printf '%s\n' "$NAME" | grep -qiE \
+                'pixel|google|biometric|fingerprint|udfps|face|keyguard|telephony|euicc|esim|panther|tensor|permission'; then
+                continue
+              fi
+
+              # Remove obvious optional/consumer overlays.
+              if printf '%s\n' "$NAME" | grep -qiE \
+                'youtube|music|photos|tv|games|news|assistant|weather|\
+                 calendar|drive|docs|sheets|slides|maps|wallet|shopping'; then
+                remove_path "$O"
+              fi
+
+            done < <(find "$OVERLAY" -mindepth 1 -maxdepth 1 -type f -name '*.apk' -print0)
+          fi
+
+          # --------------------------------------------------------------
+          # Remove obvious optional product configuration files.
+          # Do NOT remove permission XMLs globally.
+          # --------------------------------------------------------------
+
+          find "$TREE/etc" -type f \
+            \( \
+              -iname '*youtube*' \
+              -o -iname '*music*' \
+              -o -iname '*photos*' \
+              -o -iname '*googleone*' \
+              -o -iname '*google_news*' \
+            \) \
+            -print -delete 2>/dev/null || true
+
+          # Remove compiled artifacts/cache directories.
+          find "$TREE" -type d \
+            \( \
+              -name oat \
+              -o -name dalvik-cache \
+              -o -name .cache \
+            \) \
+            -prune \
+            -exec rm -rf {} + 2>/dev/null || true
+
+          # --------------------------------------------------------------
+          # Remove empty directories.
+          # --------------------------------------------------------------
+
+          find "$TREE" -depth -type d -empty -delete 2>/dev/null || true
+
+          echo
+          echo "== Cleaned product tree size =="
+          du -sh "$TREE"
+
+          # --------------------------------------------------------------
+          # Rebuild product.img as small as practical.
+          # --------------------------------------------------------------
+
+          if [ "${{ inputs.fs_type }}" = "erofs" ]; then
+
+            echo "== Creating minimum-size EROFS product image"
+
+            mkfs.erofs \
+              -zlz4hc \
+              -T 1230768000 \
+              "$CLEAN" \
+              "$TREE"
+
+          else
+
+            echo "== Creating minimum-size ext4 product image"
+
+            BYTES="$(du -sb "$TREE" | cut -f1)"
+
+            # Initial filesystem overhead.
+            SIZE=$(
+              (
+                BYTES * 110 / 100 +
+                16*1024*1024 +
+                4095
+              ) / 4096 * 4096
+            )
+
+            truncate -s "$SIZE" "$CLEAN"
+
+            mke2fs \
+              -q \
+              -t ext4 \
+              -b 4096 \
+              -L product \
+              -O ^has_journal \
+              -d "$TREE" \
+              "$CLEAN"
+
+            # Shrink to the filesystem's minimum possible size.
+            e2fsck -fy "$CLEAN" || true
+            resize2fs -M "$CLEAN"
+
+            # Make sure the resulting image is still valid.
+            e2fsck -fy "$CLEAN" >/dev/null
+
+          fi
+
+          # Replace original product image with the cleaned/minimized one.
+          mv -f "$CLEAN" "$IMG"
+
+          rm -rf "$MNT" "$TREE"
+
+          echo
+          echo "=============================================="
+          echo "CLEAN PRODUCT IMAGE"
+          echo "=============================================="
+          ls -lh "$IMG"
+
+          echo
+          echo "Filesystem:"
+          file "$IMG"
+
+          echo
+          echo "SHA256:"
+          sha256sum "$IMG"
+          
       # -------------------------------------------------- unpack HyperOS system
       - name: "Unpack HyperOS system.img into a writable tree"
         shell: sudo -E bash -eo pipefail {0}
