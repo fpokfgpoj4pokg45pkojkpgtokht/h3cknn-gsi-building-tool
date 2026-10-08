@@ -86,7 +86,7 @@ on:
 
 jobs:
   port:
-    runs-on: ubuntu-24.04
+    runs-on: self-hosted
     timeout-minutes: 360
 
     permissions:
