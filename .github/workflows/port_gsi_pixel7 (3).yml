@@ -1,4 +1,4 @@
-```yaml
+
 name: "🔧 Lunaris A16 GSI → Pixel 7 Panther BP4A (eSIM + UDFPS + KeyMint)"
 
 on:
@@ -2191,4 +2191,3 @@ jobs:
             workspace/logs/*.txt \
             --title "${{ inputs.output_name }}" \
             --generate-notes
-```
