@@ -1,4 +1,3 @@
-
 name: "🔧 Lunaris A16 GSI → Pixel 7 Panther BP4A (eSIM + UDFPS + KeyMint)"
 
 on:
@@ -32,13 +31,13 @@ on:
         default: "https://dl.google.com/dl/android/aosp/panther-bp4a.251205.006-factory-4455f800.zip"
 
       inject_factory_props:
-        description: "🧬 Import Panther BP4A system/product/system_ext properties"
+        description: "🧬 Import Panther BP4A properties"
         required: true
         type: boolean
         default: true
 
       inject_device_configs:
-        description: "🧩 Import Panther hardware configs/VINTF/permissions/init"
+        description: "🧩 Import Panther hardware configs/VINTF/permissions"
         required: true
         type: boolean
         default: true
@@ -56,13 +55,13 @@ on:
         default: true
 
       inject_framework_compat:
-        description: "🧱 Add Android framework compatibility overlays/properties"
+        description: "🧱 Add Android framework compatibility"
         required: true
         type: boolean
         default: true
 
       build_lunaris_sources:
-        description: "🛠️ Build Lunaris source components when a compatible source tree is supplied"
+        description: "🛠️ Build Lunaris sources when supplied"
         required: true
         type: boolean
         default: false
@@ -103,6 +102,7 @@ jobs:
       TARGET_SDK: "36"
       TARGET_BUILD: BP4A.251205.006
       TARGET_INCREMENTAL: "14401865"
+      TARGET_PATCH: "2025-12-05"
       TARGET_FINGERPRINT: "google/panther/panther:16/BP4A.251205.006/14401865:user/release-keys"
 
     steps:
@@ -115,29 +115,14 @@ jobs:
         uses: actions/checkout@v5
 
       # ============================================================
-      # 2. DISK
-      # ============================================================
-
-      - name: "🧹 Free disk"
-        run: |
-          sudo rm -rf \
-            /usr/share/dotnet \
-            /usr/local/lib/android \
-            /opt/ghc \
-            /opt/hostedtoolcache/CodeQL \
-            /usr/local/share/boost \
-            /usr/share/swift || true
-
-          sudo docker system prune -af || true
-
-          df -h
-
-      # ============================================================
       # 3. DEPENDENCIES
       # ============================================================
 
       - name: "⚙️ Install Android image tools"
+        shell: bash
         run: |
+          set -euo pipefail
+
           sudo apt-get update
 
           sudo apt-get install -y \
@@ -168,12 +153,13 @@ jobs:
           git lfs install
 
       # ============================================================
-      # 4. DIRECTORIES
+      # 4. WORKSPACE
       # ============================================================
 
       - name: "📁 Prepare workspace"
+        shell: bash
         run: |
-          set -eux
+          set -euo pipefail
 
           W="$GITHUB_WORKSPACE/workspace"
 
@@ -189,17 +175,21 @@ jobs:
             "$W/logs" \
             "$W/scripts"
 
+          chmod 755 "$W"
+
       # ============================================================
-      # 5. DOWNLOAD PIXEL FACTORY
+      # 5. DOWNLOAD FACTORY
       # ============================================================
 
       - name: "📱 Download Panther BP4A factory image"
         env:
           FACTORY_URL: ${{ inputs.factory_image_url }}
+        shell: bash
         run: |
           set -euo pipefail
 
           W="$GITHUB_WORKSPACE/workspace"
+
           cd "$W/factory"
 
           curl \
@@ -218,16 +208,19 @@ jobs:
           if [ -n "$EXPECTED" ]; then
             ACTUAL="$(sha256sum factory.zip | cut -c1-8)"
 
+            echo "Factory checksum:"
+            echo "  Expected: $EXPECTED"
+            echo "  Actual:   $ACTUAL"
+
             if [ "$EXPECTED" != "$ACTUAL" ]; then
               echo "::error::Factory ZIP checksum mismatch"
-              echo "Expected: $EXPECTED"
-              echo "Actual:   $ACTUAL"
               exit 1
             fi
           fi
 
+          rm -rf unpacked image
+
           unzip -q factory.zip -d unpacked
-          rm -f factory.zip
 
           IMAGE_ZIP="$(
             find unpacked \
@@ -243,38 +236,43 @@ jobs:
 
           unzip -q "$IMAGE_ZIP" -d image
 
-          echo "Factory contents:"
-          find image -maxdepth 1 -type f -printf '%f\n' | sort
+          rm -f factory.zip
+
+          echo "Factory images:"
+          find image \
+            -maxdepth 1 \
+            -type f \
+            -printf '%f\n' |
+            sort
 
       # ============================================================
       # 6. VALIDATE FACTORY
       # ============================================================
 
       - name: "🔎 Validate Panther factory"
+        shell: bash
         run: |
           set -euo pipefail
 
           W="$GITHUB_WORKSPACE/workspace"
           F="$W/factory/image"
 
-          test -f "$F/vendor.img"
-          test -f "$F/boot.img"
-          test -f "$F/vendor_boot.img"
-          test -f "$F/vbmeta.img"
-
-          if [ ! -f "$F/system.img" ]; then
-            echo "::error::Factory image has no system.img"
-            exit 1
-          fi
+          for p in vendor boot vendor_boot vbmeta system; do
+            if [ ! -f "$F/$p.img" ]; then
+              echo "::error::Missing Panther $p.img"
+              exit 1
+            fi
+          done
 
           echo "Panther factory validated."
 
       # ============================================================
-      # 7. EXTRACT FACTORY PARTITIONS
+      # 7. EXTRACT HARDWARE
       # ============================================================
 
       - name: "🧩 Extract Panther hardware partitions"
         if: ${{ inputs.inject_device_configs }}
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -283,7 +281,12 @@ jobs:
           X="$W/extracted"
 
           hex_at() {
-            dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null |
+            dd \
+              if="$1" \
+              bs=1 \
+              skip="$2" \
+              count="$3" \
+              2>/dev/null |
               xxd -p
           }
 
@@ -305,118 +308,97 @@ jobs:
             echo "$mount"
           }
 
-          # vendor
+          copy_dir() {
+            local src="$1"
+            local dst="$2"
+
+            if [ -d "$src" ]; then
+              mkdir -p "$dst"
+              sudo rsync \
+                -a \
+                --no-owner \
+                --no-group \
+                "$src/" \
+                "$dst/"
+            fi
+          }
+
+          # ------------------------------
+          # VENDOR
+          # ------------------------------
+
           if [ -f "$F/vendor.img" ]; then
             V="$(mount_partition "$F/vendor.img" vendor)"
 
             mkdir -p "$X/vendor"
 
-            sudo rsync -aHAX \
-              "$V/etc/vintf" \
-              "$X/vendor/" || true
-
-            sudo rsync -aHAX \
-              "$V/etc/permissions" \
-              "$X/vendor/" || true
-
-            sudo rsync -aHAX \
-              "$V/etc/init" \
-              "$X/vendor/" || true
-
-            sudo rsync -aHAX \
-              "$V/etc/firmware" \
-              "$X/vendor/" || true
-
-            sudo rsync -aHAX \
-              "$V/etc/bluetooth" \
-              "$X/vendor/" || true
-
-            sudo rsync -aHAX \
-              "$V/etc/thermal" \
-              "$X/vendor/" || true
-
-            sudo rsync -aHAX \
-              "$V/etc/gnss" \
-              "$X/vendor/" || true
-
-            sudo rsync -aHAX \
-              "$V/etc/modem" \
-              "$X/vendor/" || true
+            copy_dir "$V/etc/vintf"       "$X/vendor/etc/vintf"
+            copy_dir "$V/etc/permissions" "$X/vendor/etc/permissions"
+            copy_dir "$V/etc/firmware"    "$X/vendor/etc/firmware"
+            copy_dir "$V/etc/bluetooth"   "$X/vendor/etc/bluetooth"
+            copy_dir "$V/etc/thermal"     "$X/vendor/etc/thermal"
+            copy_dir "$V/etc/gnss"        "$X/vendor/etc/gnss"
+            copy_dir "$V/etc/modem"        "$X/vendor/etc/modem"
 
             sudo umount "$V"
           fi
 
+          # ------------------------------
           # ODM
+          # ------------------------------
+
           if [ -f "$F/odm.img" ]; then
             O="$(mount_partition "$F/odm.img" odm)"
 
             mkdir -p "$X/odm"
 
-            sudo rsync -aHAX \
-              "$O/etc/vintf" \
-              "$X/odm/" || true
-
-            sudo rsync -aHAX \
-              "$O/etc/permissions" \
-              "$X/odm/" || true
-
-            sudo rsync -aHAX \
-              "$O/etc/init" \
-              "$X/odm/" || true
+            copy_dir "$O/etc/vintf"       "$X/odm/etc/vintf"
+            copy_dir "$O/etc/permissions" "$X/odm/etc/permissions"
 
             sudo umount "$O"
           fi
 
-          # vendor_dlkm
+          # ------------------------------
+          # VENDOR DLKM
+          # ------------------------------
+
           if [ -f "$F/vendor_dlkm.img" ]; then
             VDK="$(mount_partition "$F/vendor_dlkm.img" vendor_dlkm)"
 
             mkdir -p "$X/vendor_dlkm"
 
-            sudo rsync -aHAX \
-              "$VDK/etc" \
-              "$X/vendor_dlkm/" || true
-
-            sudo rsync -aHAX \
-              "$VDK/lib" \
-              "$X/vendor_dlkm/" || true
-
-            sudo rsync -aHAX \
-              "$VDK/lib64" \
-              "$X/vendor_dlkm/" || true
+            copy_dir "$VDK/etc"   "$X/vendor_dlkm/etc"
+            copy_dir "$VDK/lib"   "$X/vendor_dlkm/lib"
+            copy_dir "$VDK/lib64" "$X/vendor_dlkm/lib64"
 
             sudo umount "$VDK"
           fi
 
-          # system_dlkm
+          # ------------------------------
+          # SYSTEM DLKM
+          # ------------------------------
+
           if [ -f "$F/system_dlkm.img" ]; then
-            SDK="$(mount_partition "$F/system_dlkm.img" system_dlkm)"
+            SDKLM="$(mount_partition "$F/system_dlkm.img" system_dlkm)"
 
             mkdir -p "$X/system_dlkm"
 
-            sudo rsync -aHAX \
-              "$SDK/etc" \
-              "$X/system_dlkm/" || true
+            copy_dir "$SDKLM/etc"   "$X/system_dlkm/etc"
+            copy_dir "$SDKLM/lib"   "$X/system_dlkm/lib"
+            copy_dir "$SDKLM/lib64" "$X/system_dlkm/lib64"
 
-            sudo rsync -aHAX \
-              "$SDK/lib" \
-              "$X/system_dlkm/" || true
-
-            sudo rsync -aHAX \
-              "$SDK/lib64" \
-              "$X/system_dlkm/" || true
-
-            sudo umount "$SDK"
+            sudo umount "$SDKLM"
           fi
 
-          sudo chown -R "$USER:$USER" "$X"
+          sudo chown -R "$(id -u):$(id -g)" "$X"
 
       # ============================================================
-      # 8. EXTRACT STOCK PROPERTIES
+      # 8. STOCK PROPERTIES
       # ============================================================
 
       - name: "🧬 Extract BP4A Panther properties"
         if: ${{ inputs.inject_factory_props }}
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -427,7 +409,12 @@ jobs:
           mkdir -p "$P"
 
           hex_at() {
-            dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null |
+            dd \
+              if="$1" \
+              bs=1 \
+              skip="$2" \
+              count="$3" \
+              2>/dev/null |
               xxd -p
           }
 
@@ -453,7 +440,8 @@ jobs:
             fi
 
             if [ -f "$mnt/system/build.prop" ]; then
-              sudo cp "$mnt/system/build.prop" "$P/${part}.system.build.prop"
+              sudo cp "$mnt/system/build.prop" \
+                "$P/${part}.system.build.prop"
             fi
 
             sudo umount "$mnt"
@@ -465,17 +453,19 @@ jobs:
           extract_prop_partition vendor
           extract_prop_partition odm
 
-          sudo chown -R "$USER:$USER" "$P"
+          sudo chown -R "$(id -u):$(id -g)" "$P"
 
-          cat "$P"/system.build.prop \
-              "$P"/system_ext.build.prop \
-              "$P"/product.build.prop \
-              "$P"/vendor.build.prop \
-              "$P"/odm.build.prop \
-              2>/dev/null > "$P/all-props.txt" || true
+          cat \
+            "$P/system.build.prop" \
+            "$P/system_ext.build.prop" \
+            "$P/product.build.prop" \
+            "$P/vendor.build.prop" \
+            "$P/odm.build.prop" \
+            2>/dev/null \
+            > "$P/all-props.txt" || true
 
           grep -E \
-            '^(ro\.product|ro\.build|ro\.vendor|ro\.odm|ro\.hardware|ro\.boot|ro\.config)' \
+            '^(ro\.product|ro\.build|ro\.vendor|ro\.odm|ro\.hardware)' \
             "$P/all-props.txt" \
             > "$P/panther-properties.txt" || true
 
@@ -486,6 +476,7 @@ jobs:
       - name: "📥 Download Lunaris GSI"
         env:
           ROM_URL: ${{ inputs.rom_url }}
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -500,25 +491,37 @@ jobs:
             "$ROM_URL"
 
           if xz -t "$W/gsi/input" 2>/dev/null; then
-            xz -dc "$W/gsi/input" > "$W/gsi/system.img"
+            xz -dc \
+              "$W/gsi/input" \
+              > "$W/gsi/system.img"
           else
-            mv "$W/gsi/input" "$W/gsi/system.img"
+            mv \
+              "$W/gsi/input" \
+              "$W/gsi/system.img"
           fi
 
           rm -f "$W/gsi/input"
 
+          test -s "$W/gsi/system.img"
+
       # ============================================================
-      # 10. PREPARE GSI
+      # 10. PREPARE WRITABLE EXT4
       # ============================================================
 
       - name: "🧱 Prepare writable Lunaris system"
+        shell: bash
         run: |
           set -euo pipefail
 
           W="$GITHUB_WORKSPACE/workspace"
 
           hex_at() {
-            dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null |
+            dd \
+              if="$1" \
+              bs=1 \
+              skip="$2" \
+              count="$3" \
+              2>/dev/null |
               xxd -p
           }
 
@@ -544,6 +547,7 @@ jobs:
 
           if [ "$FS" = "unknown" ]; then
             echo "::error::Unknown GSI filesystem"
+            file "$W/gsi/system.img"
             exit 1
           fi
 
@@ -563,10 +567,15 @@ jobs:
               "$W/gsi_mount"
           fi
 
-          USED="$(sudo du -sb "$W/gsi_mount" | cut -f1)"
+          USED="$(
+            sudo du -sb "$W/gsi_mount" |
+            cut -f1
+          )"
+
+          SIZE=$((USED + USED / 5 + 768 * 1024 * 1024))
 
           truncate \
-            -s $((USED + USED / 5 + 768 * 1024 * 1024)) \
+            -s "$SIZE" \
             "$W/patched/system.img"
 
           mkfs.ext4 \
@@ -586,16 +595,35 @@ jobs:
           sudo rsync \
             -aHAX \
             --numeric-ids \
+            --no-devices \
+            --no-specials \
             "$W/gsi_mount/" \
             "$W/patched/mnt/"
 
           sudo umount "$W/gsi_mount"
+
+          # CRITICAL:
+          # The copied GSI was mounted/copied as root.
+          # Normalize it BEFORE any non-root Python/cp operations.
+          sudo chown -R "$(id -u):$(id -g)" \
+            "$W/patched/mnt"
+
+          sudo find "$W/patched/mnt" \
+            -type d \
+            -exec chmod u+rwx {} +
+
+          sudo find "$W/patched/mnt" \
+            -type f \
+            -exec chmod u+rw {} +
+
+          echo "Patched filesystem permissions normalized."
 
       # ============================================================
       # 11. LOCATE SYSTEM ROOT
       # ============================================================
 
       - name: "🔎 Locate Android system root"
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -603,33 +631,60 @@ jobs:
           ROOT="$W/patched/mnt"
 
           if [ -f "$ROOT/system/build.prop" ]; then
-            echo "SYSTEM_ROOT=$ROOT/system" >> "$GITHUB_ENV"
+            SYSTEM_ROOT="$ROOT/system"
           elif [ -f "$ROOT/build.prop" ]; then
-            echo "SYSTEM_ROOT=$ROOT" >> "$GITHUB_ENV"
+            SYSTEM_ROOT="$ROOT"
           else
-            echo "::error::Lunaris system root not found"
+            echo "::error::Lunaris build.prop not found"
+
+            find "$ROOT" \
+              -maxdepth 4 \
+              -name build.prop \
+              -print
+
             exit 1
           fi
 
+          echo "SYSTEM_ROOT=$SYSTEM_ROOT"
+
+          echo "SYSTEM_ROOT=$SYSTEM_ROOT" >> "$GITHUB_ENV"
+
+          # Fix the exact issue that previously caused:
+          # cp: cannot open .../system/build.prop: Permission denied
+          sudo chown -R "$(id -u):$(id -g)" "$SYSTEM_ROOT"
+          sudo chmod u+rw "$SYSTEM_ROOT/build.prop"
+
+          test -r "$SYSTEM_ROOT/build.prop"
+          test -w "$SYSTEM_ROOT/build.prop"
+
       # ============================================================
-      # 12. PATCH PIXEL PRODUCT IDENTITY
+      # 12. PATCH IDENTITY
       # ============================================================
 
       - name: "📱 Apply exact Panther BP4A identity"
         if: ${{ inputs.inject_factory_props }}
+        shell: bash
         run: |
           set -euo pipefail
 
-          ROOT="$SYSTEM_ROOT"
-          BP="$ROOT/build.prop"
+          BP="$SYSTEM_ROOT/build.prop"
+          PIXEL="$GITHUB_WORKSPACE/workspace/pixel"
 
-          cp "$BP" "$BP.lunaris-original"
+          sudo chmod u+rw "$BP"
+          sudo cp "$BP" "$PIXEL/gsi.build.prop"
 
-          python3 <<'PY'
+          sudo chown "$(id -u):$(id -g)" \
+            "$PIXEL/gsi.build.prop"
+
+          sudo chmod 0644 "$PIXEL/gsi.build.prop"
+
+          # Pass BP through the environment.
+          # Do NOT use Path("$BP") inside a quoted heredoc.
+          BP="$BP" python3 <<'PY'
+          import os
           from pathlib import Path
 
-          bp = Path("$BP")
-          lines = bp.read_text(errors="ignore").splitlines()
+          bp = Path(os.environ["BP"])
 
           values = {
               "ro.product.brand": "google",
@@ -651,12 +706,6 @@ jobs:
               "ro.product.system.device": "panther",
               "ro.product.system.name": "panther",
 
-              "ro.product.vendor.brand": "google",
-              "ro.product.vendor.manufacturer": "Google",
-              "ro.product.vendor.model": "Pixel 7",
-              "ro.product.vendor.device": "panther",
-              "ro.product.vendor.name": "panther",
-
               "ro.build.product": "panther",
               "ro.build.device": "panther",
               "ro.build.brand": "google",
@@ -666,7 +715,6 @@ jobs:
               "ro.build.version.release": "16",
               "ro.build.version.sdk": "36",
               "ro.build.version.security_patch": "2025-12-05",
-
               "ro.build.version.incremental": "14401865",
 
               "ro.build.fingerprint":
@@ -676,35 +724,46 @@ jobs:
                   "google/panther/panther:16/BP4A.251205.006/14401865:user/release-keys",
 
               "ro.product.first_api_level": "33",
+
+              "ro.hardware": "gs201",
+              "ro.board.platform": "gs201",
           }
+
+          lines = bp.read_text(errors="ignore").splitlines()
+          keys = set(values)
 
           out = []
           seen = set()
 
           for line in lines:
               if "=" in line and not line.startswith("#"):
-                  key = line.split("=",1)[0]
+                  key = line.split("=", 1)[0]
 
-                  if key in values:
+                  if key in keys:
                       out.append(f"{key}={values[key]}")
                       seen.add(key)
                       continue
 
               out.append(line)
 
-          for k,v in values.items():
-              if k not in seen:
-                  out.append(f"{k}={v}")
+          for key, value in values.items():
+              if key not in seen:
+                  out.append(f"{key}={value}")
 
           bp.write_text("\n".join(out) + "\n")
+
+          print(f"Patched: {bp}")
           PY
 
+          sudo chmod 0644 "$BP"
+
       # ============================================================
-      # 13. PANTHER HARDWARE CONFIGURATION
+      # 13. COPY SAFE PANTHER CONFIGS
       # ============================================================
 
       - name: "🧩 Add Panther compatibility configuration"
         if: ${{ inputs.inject_device_configs }}
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -714,65 +773,73 @@ jobs:
           mkdir -p \
             "$ROOT/etc/vintf" \
             "$ROOT/etc/permissions" \
-            "$ROOT/etc/sysconfig" \
-            "$ROOT/etc/init" \
-            "$ROOT/etc/security"
+            "$ROOT/etc/sysconfig"
 
-          # Copy Panther framework-visible VINTF fragments.
-          if [ -d "$W/extracted/vendor/vintf" ]; then
-            sudo rsync -a \
-              "$W/extracted/vendor/vintf/" \
-              "$ROOT/etc/vintf/" || true
-          fi
+          copy_matching() {
+            local src="$1"
+            local dst="$2"
 
-          if [ -d "$W/extracted/odm/vintf" ]; then
-            sudo rsync -a \
-              "$W/extracted/odm/vintf/" \
-              "$ROOT/etc/vintf/" || true
-          fi
+            [ -d "$src" ] || return 0
 
-          # Panther feature declarations.
+            mkdir -p "$dst"
+
+            find "$src" \
+              -maxdepth 1 \
+              -type f \
+              -print0 |
+            while IFS= read -r -d '' file; do
+              sudo cp -a "$file" "$dst/"
+            done
+          }
+
+          # Only copy framework-visible configuration.
+          # Vendor binaries/services remain in the stock vendor stack.
+
+          copy_matching \
+            "$W/extracted/vendor/etc/permissions" \
+            "$ROOT/etc/permissions"
+
+          copy_matching \
+            "$W/extracted/odm/etc/permissions" \
+            "$ROOT/etc/permissions"
+
           cat > "$ROOT/etc/permissions/panther.xml" <<'XML'
           <?xml version="1.0" encoding="utf-8"?>
           <permissions>
-              <feature name="android.hardware.telephony" />
-              <feature name="android.hardware.telephony.gsm" />
-              <feature name="android.hardware.camera" />
-              <feature name="android.hardware.camera.autofocus" />
-              <feature name="android.hardware.nfc" />
+              <feature name="android.hardware.fingerprint" />
               <feature name="android.hardware.wifi" />
               <feature name="android.hardware.wifi.direct" />
               <feature name="android.hardware.bluetooth" />
-              <feature name="android.hardware.fingerprint" />
-              <feature name="android.hardware.telephony.euicc" />
+              <feature name="android.hardware.camera" />
+              <feature name="android.hardware.camera.autofocus" />
+              <feature name="android.hardware.nfc" />
           </permissions>
           XML
 
-          # Pixel 7 is a 1080x2400 device.
           cat > "$ROOT/etc/sysconfig/panther.xml" <<'XML'
           <?xml version="1.0" encoding="utf-8"?>
           <config>
-              <allow-in-data-usage-save package="com.android.systemui" />
+              <allow-in-power-save package="com.android.systemui" />
+              <allow-in-power-save package="com.android.phone" />
               <allow-in-power-save package="com.google.android.gms" />
-              <allow-in-power-save package="com.google.android.apps.pixelmigrate" />
-              <whitelisted-staged-installer package="com.android.vending" />
           </config>
           XML
 
-          sudo chown -R 0:0 \
-            "$ROOT/etc/permissions" \
-            "$ROOT/etc/sysconfig"
+          sudo chown 0:0 \
+            "$ROOT/etc/permissions/panther.xml" \
+            "$ROOT/etc/sysconfig/panther.xml"
 
-          sudo chmod 644 \
+          sudo chmod 0644 \
             "$ROOT/etc/permissions/panther.xml" \
             "$ROOT/etc/sysconfig/panther.xml"
 
       # ============================================================
-      # 14. UDFPS / LOCKSCREEN SUPPORT
+      # 14. BIOMETRICS
       # ============================================================
 
-      - name: "🔐 Configure Pixel 7 fingerprint / lockscreen stack"
+      - name: "🔐 Configure Pixel 7 UDFPS compatibility"
         if: ${{ inputs.inject_biometrics }}
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -780,32 +847,15 @@ jobs:
 
           mkdir -p \
             "$ROOT/etc/permissions" \
-            "$ROOT/etc/sysconfig" \
-            "$ROOT/etc/security"
+            "$ROOT/etc/sysconfig"
 
-          cat > "$ROOT/etc/permissions/android.hardware.biometrics.xml" <<'XML'
+          cat > "$ROOT/etc/permissions/panther-biometric.xml" <<'XML'
           <?xml version="1.0" encoding="utf-8"?>
           <permissions>
               <feature name="android.hardware.biometrics" />
               <feature name="android.hardware.fingerprint" />
           </permissions>
           XML
-
-          # Do NOT invent a fake fingerprint HAL.
-          #
-          # Android's lockscreen works through:
-          #
-          # Settings/SystemUI
-          #       ↓
-          # BiometricPrompt/BiometricManager
-          #       ↓
-          # BiometricService
-          #       ↓
-          # vendor fingerprint HAL
-          #       ↓
-          # Trusty / KeyMint / Gatekeeper
-          #
-          # The real Panther HAL remains in the stock vendor/odm stack.
 
           cat > "$ROOT/etc/sysconfig/panther-biometric.xml" <<'XML'
           <?xml version="1.0" encoding="utf-8"?>
@@ -816,19 +866,20 @@ jobs:
           XML
 
           sudo chown 0:0 \
-            "$ROOT/etc/permissions/android.hardware.biometrics.xml" \
+            "$ROOT/etc/permissions/panther-biometric.xml" \
             "$ROOT/etc/sysconfig/panther-biometric.xml"
 
-          sudo chmod 644 \
-            "$ROOT/etc/permissions/android.hardware.biometrics.xml" \
+          sudo chmod 0644 \
+            "$ROOT/etc/permissions/panther-biometric.xml" \
             "$ROOT/etc/sysconfig/panther-biometric.xml"
 
       # ============================================================
-      # 15. ESIM
+      # 15. EUICC
       # ============================================================
 
       - name: "📶 Import Panther eSIM/eUICC stack"
         if: ${{ inputs.inject_esim }}
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -836,86 +887,105 @@ jobs:
           ROOT="$SYSTEM_ROOT"
 
           hex_at() {
-            dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null |
+            dd \
+              if="$1" \
+              bs=1 \
+              skip="$2" \
+              count="$3" \
+              2>/dev/null |
               xxd -p
           }
 
-          extract_partition() {
+          mount_image() {
             local image="$1"
             local name="$2"
-            local raw="$W/extracted/${name}.raw"
-            local mount="$W/factory_mounts/euicc_$name"
+            local raw="$W/extracted/euicc-${name}.raw"
+            local mnt="$W/factory_mounts/euicc-${name}"
 
-            [ -f "$image" ] || return 1
-
-            mkdir -p "$mount"
+            mkdir -p "$mnt"
 
             if [ "$(hex_at "$image" 0 4)" = "ed26ff3a" ]; then
               simg2img "$image" "$raw"
               image="$raw"
             fi
 
-            sudo mount -o loop,ro "$image" "$mount"
-            echo "$mount"
+            sudo mount -o loop,ro "$image" "$mnt"
+
+            echo "$mnt"
           }
 
           for part in system_ext product system; do
-
             IMG="$W/factory/image/$part.img"
 
             [ -f "$IMG" ] || continue
 
-            MNT="$(extract_partition "$IMG" "$part")" || continue
+            MNT="$(mount_image "$IMG" "$part")"
 
             SEARCH_ROOT="$MNT"
 
-            [ -d "$MNT/system" ] && \
+            if [ -d "$MNT/system" ]; then
               SEARCH_ROOT="$MNT/system"
+            fi
 
-            for d in \
-              "$SEARCH_ROOT/priv-app"/EuiccGoogle* \
-              "$SEARCH_ROOT/priv-app"/EuiccSupportPixel* \
-              "$SEARCH_ROOT/app"/EuiccGoogle* \
-              "$SEARCH_ROOT/app"/EuiccSupportPixel*; do
+            # ------------------------------
+            # Euicc APKs
+            # ------------------------------
 
-              if [ -d "$d" ]; then
+            for base in \
+              "$SEARCH_ROOT/priv-app" \
+              "$SEARCH_ROOT/app"; do
 
-                REL="${d#"$SEARCH_ROOT"/}"
+              [ -d "$base" ] || continue
 
-                mkdir -p \
-                  "$ROOT/${part}/${REL%/*}"
+              while IFS= read -r -d '' app; do
+                NAME="$(basename "$app")"
 
-                sudo rsync \
-                  -aHAX \
-                  "$d" \
-                  "$ROOT/${part}/${REL%/*}/"
+                case "$NAME" in
+                  *Euicc*|*EUICC*|*euicc*)
+                    DEST="$ROOT/$part/$(dirname "${app#"$SEARCH_ROOT/"}")"
 
-                echo "Injected eUICC: $part/$REL"
-              fi
+                    sudo mkdir -p "$DEST"
+
+                    sudo rsync \
+                      -a \
+                      --no-owner \
+                      --no-group \
+                      "$app/" \
+                      "$DEST/$NAME/"
+
+                    echo "Imported eUICC package: $part/$NAME"
+                    ;;
+                esac
+              done < <(
+                find "$base" \
+                  -mindepth 1 \
+                  -maxdepth 1 \
+                  -type d \
+                  -print0
+              )
             done
 
-            for d in \
-              permissions \
-              sysconfig; do
+            # ------------------------------
+            # eUICC permissions/sysconfig
+            # ------------------------------
 
-              if [ -d "$SEARCH_ROOT/etc/$d" ]; then
+            for ETC in permissions sysconfig; do
+              SRC="$SEARCH_ROOT/etc/$ETC"
 
-                mkdir -p \
-                  "$ROOT/${part}/etc/$d"
+              [ -d "$SRC" ] || continue
 
-                find \
-                  "$SEARCH_ROOT/etc/$d" \
-                  -maxdepth 1 \
-                  -type f \
-                  \( \
-                    -iname '*euicc*' \
-                    -o \
-                    -iname '*telephony*' \
-                  \) \
-                  -exec sudo cp -a {} \
-                    "$ROOT/${part}/etc/$d/" \; \
-                  || true
-              fi
+              mkdir -p "$ROOT/$part/etc/$ETC"
+
+              find "$SRC" \
+                -maxdepth 1 \
+                -type f \
+                \( \
+                  -iname '*euicc*' \
+                  -o -iname '*telephony*' \
+                \) \
+                -exec sudo cp -a {} \
+                  "$ROOT/$part/etc/$ETC/" \; \
+                || true
             done
 
             sudo umount "$MNT"
@@ -923,19 +993,27 @@ jobs:
 
           mkdir -p "$ROOT/etc/permissions"
 
-          cat > "$ROOT/etc/permissions/android.hardware.telephony.euicc.xml" <<'XML'
+          cat > \
+            "$ROOT/etc/permissions/android.hardware.telephony.euicc.xml" <<'XML'
           <?xml version="1.0" encoding="utf-8"?>
           <permissions>
               <feature name="android.hardware.telephony.euicc" />
           </permissions>
           XML
 
+          sudo chown 0:0 \
+            "$ROOT/etc/permissions/android.hardware.telephony.euicc.xml"
+
+          sudo chmod 0644 \
+            "$ROOT/etc/permissions/android.hardware.telephony.euicc.xml"
+
       # ============================================================
-      # 16. FRAMEWORK COMPATIBILITY
+      # 16. FRAMEWORK COMPAT
       # ============================================================
 
       - name: "🧱 Add Android 16 Panther framework compatibility"
         if: ${{ inputs.inject_framework_compat }}
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -948,916 +1026,371 @@ jobs:
           cat > "$ROOT/etc/sysconfig/panther-framework.xml" <<'XML'
           <?xml version="1.0" encoding="utf-8"?>
           <config>
-
-              <!-- Pixel 7 -->
               <allow-in-power-save package="com.android.systemui" />
-
-              <!-- Biometrics -->
-              <allow-in-power-save package="com.google.android.gms" />
-
-              <!-- Telephony -->
               <allow-in-power-save package="com.android.phone" />
-
+              <allow-in-power-save package="com.google.android.gms" />
           </config>
           XML
 
-          # Android 16 / Pixel identity.
+          sudo chown 0:0 \
+            "$ROOT/etc/sysconfig/panther-framework.xml"
+
+          sudo chmod 0644 \
+            "$ROOT/etc/sysconfig/panther-framework.xml"
+
+          # Safe static properties only.
           cat >> "$ROOT/build.prop" <<'EOF'
 
           # ===== Panther BP4A compatibility =====
           ro.hardware=gs201
           ro.board.platform=gs201
-          ro.boot.hardware=gs201
 
           ro.product.cpu.abi=arm64-v8a
           ro.product.cpu.abilist=arm64-v8a
           ro.product.cpu.abilist32=
 
-          ro.telephony.default_network=33
-          ro.telephony.default_network.0=33
-          ro.telephony.default_network.1=33
-
           ro.config.low_ram=false
 
-          persist.sys.fflag.override.settings_enable_spa=true
-
-          # Pixel display
           ro.sf.lcd_density=420
 
-          # UDFPS
-          persist.sys.fingerprint.feature=true
-
-          # eSIM
-          euicc.seamless_transfer_enabled_in_non_qs=true
+          ro.treble.enabled=true
+          ro.vndk.version=36
           EOF
-          
+
       # ============================================================
-      # 16B. EXTENDED PIXEL 7 HARDWARE COMPATIBILITY
+      # 16B. DERIVE VENDOR API
       # ============================================================
 
-      - name: "🧬 Apply extended Panther hardware compatibility"
+      - name: "🧬 Match Panther vendor API level"
+        if: ${{ inputs.inject_factory_props }}
+        shell: bash
         run: |
           set -euo pipefail
 
           ROOT="$SYSTEM_ROOT"
+          VP="$GITHUB_WORKSPACE/workspace/pixel/vendor.build.prop"
 
-          mkdir -p \
-            "$ROOT/etc/permissions" \
-            "$ROOT/etc/sysconfig" \
-            "$ROOT/etc/security" \
-            "$ROOT/etc/init"
+          VENDOR_API=""
 
-          cat >> "$ROOT/build.prop" <<'EOF'
+          if [ -f "$VP" ]; then
+            VENDOR_API="$(
+              sed -n \
+                's/^ro.vendor.api_level=//p' \
+                "$VP" |
+                head -n1
+            )"
+          fi
 
-          # ==========================================================
-          # PIXEL 7 PANTHER / GS201 COMPATIBILITY
-          # ==========================================================
+          if [ -n "$VENDOR_API" ]; then
+            echo "Panther vendor API: $VENDOR_API"
 
-          ro.hardware=gs201
-          ro.board.platform=gs201
-          ro.boot.hardware=gs201
-
-          ro.product.cpu.abi=arm64-v8a
-          ro.product.cpu.abilist=arm64-v8a
-          ro.product.cpu.abilist32=
-
-          ro.config.low_ram=false
-          ro.config.small_battery=false
-
-          # ==========================================================
-          # DISPLAY / GRAPHICS
-          # ==========================================================
-
-          ro.sf.lcd_density=420
-          ro.surface_flinger.max_frame_buffer_acquired_buffers=3
-
-          debug.sf.enable_hwc_vds=1
-          debug.sf.latch_unsignaled=1
-          debug.sf.disable_backpressure=1
-
-          vendor.display.disable_skip_validate=0
-
-          # ==========================================================
-          # BIOMETRICS / UDFPS
-          # ==========================================================
-
-          persist.sys.fingerprint.feature=true
-          persist.vendor.fingerprint.feature=true
-
-          ro.hardware.biometrics.fingerprint=udfps
-          ro.hardware.fingerprint=udfps
-
-          persist.sys.udfps.enabled=true
-          persist.vendor.udfps.enabled=true
-
-          persist.sys.fingerprint.udfps=true
-          persist.vendor.fingerprint.udfps=true
-
-          # ==========================================================
-          # LOCKSCREEN / AOD
-          # ==========================================================
-
-          ro.config.support_aod=true
-          ro.config.always_on_display=true
-
-          persist.sys.aod.enabled=true
-          persist.vendor.aod.enabled=true
-
-          persist.sys.biometrics.enabled=true
-
-          # ==========================================================
-          # KEYMINT / KEYSTORE / GATEKEEPER
-          # ==========================================================
-
-          ro.hardware.keystore=strongbox
-          ro.hardware.keystore2=strongbox
-
-          persist.sys.keystore2.enabled=true
-          persist.sys.keymint.enabled=true
-
-          ro.security.keystore2.enabled=true
-          ro.security.strongbox.support=true
-
-          # Do not claim StrongBox hardware to framework unless
-          # the actual Panther service is present.
-          # Runtime validation below handles this.
-
-          # ==========================================================
-          # TELEPHONY
-          # ==========================================================
-
-          ro.telephony.default_network=33
-          ro.telephony.default_network.0=33
-          ro.telephony.default_network.1=33
-
-          persist.radio.multisim.config=dsds
-
-          persist.radio.multisim.stackid_0=0
-          persist.radio.multisim.stackid_1=1
-
-          ro.telephony.call_ring.multiple=false
-          ro.telephony.ril_class=Qualcomm
-
-          # ==========================================================
-          # eSIM / EUICC
-          # ==========================================================
-
-          persist.sys.euicc.enabled=true
-          persist.vendor.euicc.enabled=true
-
-          ro.telephony.euicc=true
-          ro.hardware.euicc=true
-
-          euicc.seamless_transfer_enabled_in_non_qs=true
-
-          # ==========================================================
-          # NFC
-          # ==========================================================
-
-          ro.nfc.port=I2C
-          persist.nfc.smartcard.config=SIM1,SIM2,eSE
-
-          # ==========================================================
-          # WIFI
-          # ==========================================================
-
-          persist.sys.wifi.enabled=true
-          persist.vendor.wifi.enabled=true
-
-          wifi.interface=wlan0
-          wifi.direct.interface=p2p0
-
-          # ==========================================================
-          # BLUETOOTH
-          # ==========================================================
-
-          persist.sys.bt.enabled=true
-          persist.vendor.bt.enabled=true
-
-          # ==========================================================
-          # CAMERA
-          # ==========================================================
-
-          persist.vendor.camera.HAL3.enabled=1
-          persist.vendor.camera.enableHidl=1
-
-          # ==========================================================
-          # USB / ADB
-          # ==========================================================
-
-          persist.sys.usb.config=adb
-          persist.sys.usb.configfs=1
-
-          # ==========================================================
-          # GOOGLE FRAMEWORK
-          # ==========================================================
-
-          ro.com.google.clientidbase=android-google
-          ro.com.google.gmsversion=16_202512
-
-          # ==========================================================
-          # TREBLE
-          # ==========================================================
-
-          ro.treble.enabled=true
-          ro.vndk.version=36
-
-          # ==========================================================
-          # POWER
-          # ==========================================================
-
-          ro.power_profile=panther
-
-          EOF
-
-          cat > "$ROOT/etc/permissions/panther-extra-hardware.xml" <<'XML'
-          <?xml version="1.0" encoding="utf-8"?>
-          <permissions>
-              <feature name="android.hardware.biometrics" />
-              <feature name="android.hardware.fingerprint" />
-              <feature name="android.hardware.telephony" />
-              <feature name="android.hardware.telephony.gsm" />
-              <feature name="android.hardware.telephony.euicc" />
-              <feature name="android.hardware.wifi" />
-              <feature name="android.hardware.wifi.direct" />
-              <feature name="android.hardware.bluetooth" />
-              <feature name="android.hardware.camera" />
-              <feature name="android.hardware.camera.autofocus" />
-              <feature name="android.hardware.nfc" />
-          </permissions>
-          XML
-
-          cat > "$ROOT/etc/sysconfig/panther-runtime.xml" <<'XML'
-          <?xml version="1.0" encoding="utf-8"?>
-          <config>
-              <allow-in-power-save package="com.android.systemui" />
-              <allow-in-power-save package="android" />
-              <allow-in-power-save package="com.android.phone" />
-              <allow-in-power-save package="com.android.settings" />
-              <allow-in-power-save package="com.google.android.gms" />
-
-              <allow-unthrottled-location package="com.google.android.gms" />
-              <allow-unthrottled-location package="com.android.systemui" />
-          </config>
-          XML
-
-          chown 0:0 \
-            "$ROOT/etc/permissions/panther-extra-hardware.xml" \
-            "$ROOT/etc/sysconfig/panther-runtime.xml"
-
-          chmod 0644 \
-            "$ROOT/etc/permissions/panther-extra-hardware.xml" \
-            "$ROOT/etc/sysconfig/panther-runtime.xml"
+            {
+              echo
+              echo "# Stock Panther vendor API"
+              echo "ro.vendor.api_level=$VENDOR_API"
+            } >> "$ROOT/build.prop"
+          else
+            echo "WARNING: Could not determine stock vendor API."
+          fi
 
       # ============================================================
-      # 16C. DETECT REAL PANTHER HALS
+      # 17. DETECT REAL HARDWARE
       # ============================================================
 
-      - name: "🔍 Detect Panther biometric / eSIM / KeyMint HALs"
+      - name: "🔍 Detect real Panther HALs"
+        shell: bash
         run: |
           set -euo pipefail
 
           W="$GITHUB_WORKSPACE/workspace"
           ROOT="$SYSTEM_ROOT"
-
           REPORT="$W/logs/panther-hardware-detection.txt"
 
           : > "$REPORT"
 
-          echo "===== PANTHER HARDWARE SERVICE DETECTION =====" | tee -a "$REPORT"
-
-          find "$W/extracted" \
-            -type f \
-            \( \
-              -iname '*fingerprint*' \
-              -o -iname '*biometric*' \
-              -o -iname '*keymint*' \
-              -o -iname '*gatekeeper*' \
-              -o -iname '*euicc*' \
-              -o -iname '*secure_element*' \
-              -o -iname '*nfc*' \
-            \) \
-            2>/dev/null |
-            sort |
-            tee -a "$REPORT" || true
-
-          echo | tee -a "$REPORT"
-
-          echo "===== KEYMINT =====" | tee -a "$REPORT"
-
-          KEYMINT_FOUND=0
-
-          if find "$W/extracted" \
-              -type f \
-              \( \
-                -iname '*keymint*' \
-                -o -iname '*keystore2*' \
-              \) \
-              2>/dev/null |
-              grep -q .; then
-            KEYMINT_FOUND=1
-          fi
-
-          if [ "$KEYMINT_FOUND" = "1" ]; then
-            echo "Panther KeyMint implementation detected." |
-              tee -a "$REPORT"
-
-            cat >> "$ROOT/build.prop" <<'EOF'
-          persist.sys.keymint.available=true
-          persist.sys.keystore2.available=true
-          EOF
-          else
-            echo "WARNING: Panther KeyMint binary not found in extracted partitions." |
-              tee -a "$REPORT"
-          fi
-
-          echo "===== FINGERPRINT =====" | tee -a "$REPORT"
-
-          FP_FOUND=0
-
-          if find "$W/extracted" \
+          {
+            echo "===== PANTHER HARDWARE DETECTION ====="
+            echo
+            echo "Potential hardware services/files:"
+            find "$W/extracted" \
               -type f \
               \( \
                 -iname '*fingerprint*' \
                 -o -iname '*biometric*' \
+                -o -iname '*keymint*' \
+                -o -iname '*gatekeeper*' \
+                -o -iname '*euicc*' \
+                -o -iname '*secure*element*' \
               \) \
               2>/dev/null |
-              grep -q .; then
-            FP_FOUND=1
-          fi
+              sort |
+              head -300
 
-          if [ "$FP_FOUND" = "1" ]; then
-            echo "Panther fingerprint implementation detected." |
-              tee -a "$REPORT"
+            echo
+            echo "===== SERVICE FLAGS ====="
 
-            cat >> "$ROOT/build.prop" <<'EOF'
+            KEYMINT=0
+            FINGERPRINT=0
+            GATEKEEPER=0
+            EUICC=0
+
+            if find "$W/extracted" \
+                -type f \
+                \( -iname '*keymint*' -o -iname '*keystore2*' \) \
+                2>/dev/null |
+                grep -q .; then
+              KEYMINT=1
+            fi
+
+            if find "$W/extracted" \
+                -type f \
+                \( -iname '*fingerprint*' -o -iname '*biometric*' \) \
+                2>/dev/null |
+                grep -q .; then
+              FINGERPRINT=1
+            fi
+
+            if find "$W/extracted" \
+                -type f \
+                -iname '*gatekeeper*' \
+                2>/dev/null |
+                grep -q .; then
+              GATEKEEPER=1
+            fi
+
+            if find "$W/extracted" \
+                -type f \
+                -iname '*euicc*' \
+                2>/dev/null |
+                grep -q .; then
+              EUICC=1
+            fi
+
+            echo "KeyMint:     $KEYMINT"
+            echo "Fingerprint: $FINGERPRINT"
+            echo "Gatekeeper:  $GATEKEEPER"
+            echo "eUICC:       $EUICC"
+
+            echo
+            echo "===== CONDITIONAL PROPERTIES ====="
+
+            if [ "$KEYMINT" = "1" ]; then
+              cat >> "$ROOT/build.prop" <<'EOF'
+
+          # Stock Panther KeyMint implementation detected.
+          persist.sys.keymint.available=true
+          persist.sys.keystore2.available=true
+          EOF
+            fi
+
+            if [ "$FINGERPRINT" = "1" ]; then
+              cat >> "$ROOT/build.prop" <<'EOF'
+
+          # Stock Panther fingerprint implementation detected.
           persist.sys.fingerprint.available=true
           persist.sys.udfps.available=true
           EOF
-          else
-            echo "WARNING: Panther fingerprint implementation not found." |
-              tee -a "$REPORT"
-          fi
+            fi
 
-          echo "===== EUICC =====" | tee -a "$REPORT"
+            if [ "$GATEKEEPER" = "1" ]; then
+              cat >> "$ROOT/build.prop" <<'EOF'
 
-          EUICC_FOUND=0
+          # Stock Panther Gatekeeper implementation detected.
+          persist.sys.gatekeeper.available=true
+          EOF
+            fi
 
-          if find "$W/extracted" \
-              -type f \
-              \( \
-                -iname '*euicc*' \
-                -o -iname '*euiccservice*' \
-              \) \
-              2>/dev/null |
-              grep -q .; then
-            EUICC_FOUND=1
-          fi
+            if [ "$EUICC" = "1" ]; then
+              cat >> "$ROOT/build.prop" <<'EOF'
 
-          if [ "$EUICC_FOUND" = "1" ]; then
-            echo "Panther eUICC implementation detected." |
-              tee -a "$REPORT"
-
-            cat >> "$ROOT/build.prop" <<'EOF'
+          # Stock Panther eUICC implementation detected.
           persist.sys.euicc.available=true
           persist.vendor.euicc.available=true
           EOF
-          else
-            echo "WARNING: Panther eUICC implementation not found." |
-              tee -a "$REPORT"
-          fi
+            fi
 
-          echo "===== FINAL HARDWARE STATUS =====" |
-            tee -a "$REPORT"
+          } | tee "$REPORT"
 
-          echo "KeyMint:    $KEYMINT_FOUND" |
-            tee -a "$REPORT"
-
-          echo "Fingerprint: $FP_FOUND" |
-            tee -a "$REPORT"
-
-          echo "eUICC:      $EUICC_FOUND" |
-            tee -a "$REPORT"
-            
       # ============================================================
-      # 17. SELINUX LABELS
+      # 18. SAFE RESETPROP RUNTIME
       # ============================================================
 
-      - name: "🔒 Restore SELinux labels"
+      - name: "🛠️ Install Panther resetprop runtime"
+        shell: bash
         run: |
           set -euo pipefail
 
           ROOT="$SYSTEM_ROOT"
 
-          sudo chown -R 0:0 "$ROOT/etc"
+          mkdir -p \
+            "$ROOT/bin" \
+            "$ROOT/etc/init"
 
-          # Only label files we created.
-          for f in \
-            "$ROOT/etc/permissions/panther.xml" \
-            "$ROOT/etc/permissions/android.hardware.biometrics.xml" \
-            "$ROOT/etc/permissions/android.hardware.telephony.euicc.xml" \
-            "$ROOT/etc/sysconfig/panther.xml" \
-            "$ROOT/etc/sysconfig/panther-biometric.xml" \
-            "$ROOT/etc/sysconfig/panther-framework.xml"; do
+          cat > "$ROOT/bin/panther_props.sh" <<'SH'
+          #!/system/bin/sh
 
-            [ -f "$f" ] || continue
+          # ==========================================================
+          # Panther runtime compatibility
+          #
+          # This script NEVER pretends resetprop exists.
+          # A real resetprop implementation must come from the
+          # installed root framework (Magisk/KernelSU/etc.).
+          # ==========================================================
 
-            sudo setfattr \
-              -n security.selinux \
-              -v u:object_r:system_file:s0 \
-              "$f" || true
+          RESETPROP=""
+
+          for candidate in \
+              /system/bin/resetprop \
+              /system/xbin/resetprop \
+              /debug_ramdisk/system/bin/resetprop \
+              /data/adb/magisk/resetprop \
+              /data/adb/ksu/bin/resetprop; do
+
+              if [ -x "$candidate" ]; then
+                  RESETPROP="$candidate"
+                  break
+              fi
           done
 
-      # ============================================================
-      # 18. RESET PROP BOOT COMPATIBILITY
-      # ============================================================
+          LOGTAG="panther-props"
 
-      - name: "🛠️ Add Panther runtime property compatibility"
-        run: |
-          set -euo pipefail
-
-          ROOT="$SYSTEM_ROOT"
-
-          mkdir -p "$ROOT/bin"
-
-          cat > "$ROOT/bin/panther_props.sh" <<'SH'
-          #!/system/bin/sh
-
-          resetprop() {
-              /system/bin/resetprop "$@"
+          logmsg() {
+              log -t "$LOGTAG" "$*" 2>/dev/null || true
           }
 
-          resetprop ro.product.brand google
-          resetprop ro.product.manufacturer Google
-          resetprop ro.product.model "Pixel 7"
-          resetprop ro.product.device panther
-          resetprop ro.product.name panther
-          resetprop ro.product.board gs201
+          if [ -z "$RESETPROP" ]; then
+              logmsg "No resetprop implementation available; runtime immutable-property patch skipped"
+              exit 0
+          fi
 
-          resetprop ro.build.product panther
-          resetprop ro.build.device panther
-          resetprop ro.build.brand google
-          resetprop ro.build.manufacturer Google
-          resetprop ro.build.model "Pixel 7"
+          rp() {
+              "$RESETPROP" -n "$1" "$2" 2>/dev/null || \
+              "$RESETPROP" "$1" "$2" 2>/dev/null || true
+          }
 
-          resetprop ro.product.first_api_level 33
+          logmsg "Using resetprop: $RESETPROP"
 
-          resetprop ro.build.version.sdk 36
-          resetprop ro.build.version.release 16
+          # ==========================================================
+          # PRODUCT IDENTITY
+          # ==========================================================
 
-          resetprop ro.hardware gs201
-          resetprop ro.board.platform gs201
-          resetprop ro.boot.hardware gs201
+          rp ro.product.brand google
+          rp ro.product.manufacturer Google
+          rp ro.product.model "Pixel 7"
+          rp ro.product.device panther
+          rp ro.product.name panther
+          rp ro.product.board gs201
 
-          resetprop persist.sys.fingerprint.feature true
+          rp ro.product.product.brand google
+          rp ro.product.product.manufacturer Google
+          rp ro.product.product.model "Pixel 7"
+          rp ro.product.product.device panther
+          rp ro.product.product.name panther
+
+          rp ro.product.system.brand google
+          rp ro.product.system.manufacturer Google
+          rp ro.product.system.model "Pixel 7"
+          rp ro.product.system.device panther
+          rp ro.product.system.name panther
+
+          # ==========================================================
+          # BUILD
+          # ==========================================================
+
+          rp ro.build.product panther
+          rp ro.build.device panther
+          rp ro.build.brand google
+          rp ro.build.manufacturer Google
+          rp ro.build.model "Pixel 7"
+
+          rp ro.build.version.release 16
+          rp ro.build.version.sdk 36
+          rp ro.product.first_api_level 33
+
+          rp ro.build.version.security_patch 2025-12-05
+          rp ro.build.version.incremental 14401865
+
+          rp ro.build.fingerprint \
+            "google/panther/panther:16/BP4A.251205.006/14401865:user/release-keys"
+
+          rp ro.system.build.fingerprint \
+            "google/panther/panther:16/BP4A.251205.006/14401865:user/release-keys"
+
+          # ==========================================================
+          # HARDWARE
+          # ==========================================================
+
+          rp ro.hardware gs201
+          rp ro.board.platform gs201
+
+          # Do NOT spoof:
+          # ro.boot.verifiedbootstate
+          # ro.boot.flash.locked
+          # ro.boot.vbmeta.device_state
+          # ro.crypto.state
+          # ro.crypto.type
+
+          # Those must come from the real boot/security stack.
+
+          # ==========================================================
+          # UDFPS
+          # ==========================================================
+
+          rp persist.sys.fingerprint.feature true
+          rp persist.vendor.fingerprint.feature true
+
+          rp persist.sys.fingerprint.available true
+          rp persist.sys.udfps.available true
+
+          rp persist.sys.udfps.enabled true
+          rp persist.vendor.udfps.enabled true
+
+          rp persist.sys.fingerprint.udfps true
+          rp persist.vendor.fingerprint.udfps true
+
+          # ==========================================================
+          # LOCKSCREEN / BIOMETRICS
+          # ==========================================================
+
+          rp persist.sys.biometrics.enabled true
+
+          # ==========================================================
+          # EUICC
+          # ==========================================================
+
+          rp persist.sys.euicc.enabled true
+          rp persist.vendor.euicc.enabled true
+
+          rp persist.sys.euicc.available true
+          rp persist.vendor.euicc.available true
+
+          # ==========================================================
+          # TREBLE
+          # ==========================================================
+
+          rp ro.treble.enabled true
+          rp ro.vndk.version 36
+
+          # ==========================================================
+          # DISPLAY
+          # ==========================================================
+
+          rp ro.sf.lcd_density 420
+
+          logmsg "Panther runtime properties applied"
+
+          exit 0
           SH
 
-          chmod 755 "$ROOT/bin/panther_props.sh"
           sudo chown 0:2000 "$ROOT/bin/panther_props.sh"
+          sudo chmod 0755 "$ROOT/bin/panther_props.sh"
 
       # ============================================================
-      # 18. EXTENDED RESETPROP RUNTIME COMPATIBILITY
-      # ============================================================
-
-      - name: "🛠️ Install extended Panther resetprop compatibility"
-        run: |
-          set -euo pipefail
-
-          ROOT="$SYSTEM_ROOT"
-
-          mkdir -p \
-            "$ROOT/bin" \
-            "$ROOT/etc/init"
-
-          cat > "$ROOT/bin/panther_props.sh" <<'SH'
-          #!/system/bin/sh
-
-          RESETPROP=""
-
-          if [ -x /system/bin/resetprop ]; then
-              RESETPROP=/system/bin/resetprop
-          elif [ -x /system/xbin/resetprop ]; then
-              RESETPROP=/system/xbin/resetprop
-          fi
-
-          if [ -z "$RESETPROP" ]; then
-              exit 0
-          fi
-
-          rp() {
-              "$RESETPROP" -n "$1" "$2" 2>/dev/null || \
-              "$RESETPROP" "$1" "$2" 2>/dev/null || true
-          }
-
-          # ==========================================================
-          # PRODUCT IDENTITY
-          # ==========================================================
-
-          rp ro.product.brand google
-          rp ro.product.manufacturer Google
-          rp ro.product.model "Pixel 7"
-          rp ro.product.device panther
-          rp ro.product.name panther
-          rp ro.product.board gs201
-
-          rp ro.product.product.brand google
-          rp ro.product.product.manufacturer Google
-          rp ro.product.product.model "Pixel 7"
-          rp ro.product.product.device panther
-          rp ro.product.product.name panther
-
-          rp ro.product.system.brand google
-          rp ro.product.system.manufacturer Google
-          rp ro.product.system.model "Pixel 7"
-          rp ro.product.system.device panther
-          rp ro.product.system.name panther
-
-          rp ro.product.vendor.brand google
-          rp ro.product.vendor.manufacturer Google
-          rp ro.product.vendor.model "Pixel 7"
-          rp ro.product.vendor.device panther
-          rp ro.product.vendor.name panther
-
-          # ==========================================================
-          # BUILD IDENTITY
-          # ==========================================================
-
-          rp ro.build.product panther
-          rp ro.build.device panther
-          rp ro.build.brand google
-          rp ro.build.manufacturer Google
-          rp ro.build.model "Pixel 7"
-
-          rp ro.build.version.release 16
-          rp ro.build.version.sdk 36
-          rp ro.product.first_api_level 33
-
-          rp ro.build.version.security_patch 2025-12-05
-          rp ro.build.version.incremental 14401865
-
-          rp ro.build.fingerprint \
-            "google/panther/panther:16/BP4A.251205.006/14401865:user/release-keys"
-
-          rp ro.system.build.fingerprint \
-            "google/panther/panther:16/BP4A.251205.006/14401865:user/release-keys"
-
-          # ==========================================================
-          # HARDWARE
-          # ==========================================================
-
-          rp ro.hardware gs201
-          rp ro.board.platform gs201
-          rp ro.boot.hardware gs201
-
-          rp ro.hardware.keystore2 strongbox
-          rp ro.hardware.keystore strongbox
-
-          # ==========================================================
-          # BIOMETRICS
-          # ==========================================================
-
-          rp persist.sys.fingerprint.feature true
-          rp persist.vendor.fingerprint.feature true
-
-          rp persist.sys.fingerprint.available true
-          rp persist.sys.udfps.available true
-
-          rp persist.sys.udfps.enabled true
-          rp persist.vendor.udfps.enabled true
-
-          rp persist.sys.fingerprint.udfps true
-          rp persist.vendor.fingerprint.udfps true
-
-          rp ro.hardware.biometrics.fingerprint udfps
-          rp ro.hardware.fingerprint udfps
-
-          # ==========================================================
-          # LOCKSCREEN / AOD
-          # ==========================================================
-
-          rp persist.sys.biometrics.enabled true
-          rp persist.sys.aod.enabled true
-          rp persist.vendor.aod.enabled true
-
-          rp ro.config.support_aod true
-          rp ro.config.always_on_display true
-
-          # ==========================================================
-          # EUICC
-          # ==========================================================
-
-          rp persist.sys.euicc.enabled true
-          rp persist.vendor.euicc.enabled true
-
-          rp persist.sys.euicc.available true
-          rp persist.vendor.euicc.available true
-
-          rp ro.telephony.euicc true
-          rp ro.hardware.euicc true
-
-          # ==========================================================
-          # TELEPHONY
-          # ==========================================================
-
-          rp persist.radio.multisim.config dsds
-
-          rp ro.telephony.default_network 33
-          rp ro.telephony.default_network.0 33
-          rp ro.telephony.default_network.1 33
-
-          # ==========================================================
-          # TREBLE
-          # ==========================================================
-
-          rp ro.treble.enabled true
-          rp ro.vndk.version 36
-
-          # ==========================================================
-          # DISPLAY
-          # ==========================================================
-
-          rp ro.sf.lcd_density 420
-
-          # ==========================================================
-          # USB
-          # ==========================================================
-
-          rp persist.sys.usb.config adb
-          rp persist.sys.usb.configfs 1
-
-          exit 0
-          SH
-
-          chmod 0755 "$ROOT/bin/panther_props.sh"
-          chown 0:2000 "$ROOT/bin/panther_props.sh"
-
-          cat > "$ROOT/etc/init/panther-props.rc" <<'RC'
-          on post-fs-data
-              exec u:r:init:s0 root root -- /system/bin/panther_props.sh
-
-          on boot
-              exec u:r:init:s0 root root -- /system/bin/panther_props.sh
-
-          on property:sys.boot_completed=1
-              exec u:r:init:s0 root root -- /system/bin/panther_props.sh
-
-          on property:sys.boot_completed=0
-              exec u:r:init:s0 root root -- /system/bin/panther_props.sh
-          RC
-
-          chown 0:0 "$ROOT/etc/init/panther-props.rc"
-          chmod 0644 "$ROOT/etc/init/panther-props.rc"
-
-      # ============================================================
-      # 18B. EXTENDED RESETPROP RUNTIME COMPATIBILITY
-      # ============================================================
-
-      - name: "🛠️ Install extended Panther resetprop compatibility"
-        run: |
-          set -euo pipefail
-
-          ROOT="$SYSTEM_ROOT"
-
-          mkdir -p \
-            "$ROOT/bin" \
-            "$ROOT/etc/init"
-
-          cat > "$ROOT/bin/panther_props.sh" <<'SH'
-          #!/system/bin/sh
-
-          RESETPROP=""
-
-          if [ -x /system/bin/resetprop ]; then
-              RESETPROP=/system/bin/resetprop
-          elif [ -x /system/xbin/resetprop ]; then
-              RESETPROP=/system/xbin/resetprop
-          fi
-
-          if [ -z "$RESETPROP" ]; then
-              exit 0
-          fi
-
-          rp() {
-              "$RESETPROP" -n "$1" "$2" 2>/dev/null || \
-              "$RESETPROP" "$1" "$2" 2>/dev/null || true
-          }
-
-          # ==========================================================
-          # PRODUCT IDENTITY
-          # ==========================================================
-
-          rp ro.product.brand google
-          rp ro.product.manufacturer Google
-          rp ro.product.model "Pixel 7"
-          rp ro.product.device panther
-          rp ro.product.name panther
-          rp ro.product.board gs201
-
-          rp ro.product.product.brand google
-          rp ro.product.product.manufacturer Google
-          rp ro.product.product.model "Pixel 7"
-          rp ro.product.product.device panther
-          rp ro.product.product.name panther
-
-          rp ro.product.system.brand google
-          rp ro.product.system.manufacturer Google
-          rp ro.product.system.model "Pixel 7"
-          rp ro.product.system.device panther
-          rp ro.product.system.name panther
-
-          rp ro.product.vendor.brand google
-          rp ro.product.vendor.manufacturer Google
-          rp ro.product.vendor.model "Pixel 7"
-          rp ro.product.vendor.device panther
-          rp ro.product.vendor.name panther
-
-          # ==========================================================
-          # BUILD IDENTITY
-          # ==========================================================
-
-          rp ro.build.product panther
-          rp ro.build.device panther
-          rp ro.build.brand google
-          rp ro.build.manufacturer Google
-          rp ro.build.model "Pixel 7"
-
-          rp ro.build.version.release 16
-          rp ro.build.version.sdk 36
-          rp ro.product.first_api_level 33
-
-          rp ro.build.version.security_patch 2025-12-05
-          rp ro.build.version.incremental 14401865
-
-          rp ro.build.fingerprint \
-            "google/panther/panther:16/BP4A.251205.006/14401865:user/release-keys"
-
-          rp ro.system.build.fingerprint \
-            "google/panther/panther:16/BP4A.251205.006/14401865:user/release-keys"
-
-          # ==========================================================
-          # HARDWARE
-          # ==========================================================
-
-          rp ro.hardware gs201
-          rp ro.board.platform gs201
-          rp ro.boot.hardware gs201
-
-          rp ro.hardware.keystore2 strongbox
-          rp ro.hardware.keystore strongbox
-
-          # ==========================================================
-          # BIOMETRICS
-          # ==========================================================
-
-          rp persist.sys.fingerprint.feature true
-          rp persist.vendor.fingerprint.feature true
-
-          rp persist.sys.fingerprint.available true
-          rp persist.sys.udfps.available true
-
-          rp persist.sys.udfps.enabled true
-          rp persist.vendor.udfps.enabled true
-
-          rp persist.sys.fingerprint.udfps true
-          rp persist.vendor.fingerprint.udfps true
-
-          rp ro.hardware.biometrics.fingerprint udfps
-          rp ro.hardware.fingerprint udfps
-
-          # ==========================================================
-          # LOCKSCREEN / AOD
-          # ==========================================================
-
-          rp persist.sys.biometrics.enabled true
-          rp persist.sys.aod.enabled true
-          rp persist.vendor.aod.enabled true
-
-          rp ro.config.support_aod true
-          rp ro.config.always_on_display true
-
-          # ==========================================================
-          # EUICC
-          # ==========================================================
-
-          rp persist.sys.euicc.enabled true
-          rp persist.vendor.euicc.enabled true
-
-          rp persist.sys.euicc.available true
-          rp persist.vendor.euicc.available true
-
-          rp ro.telephony.euicc true
-          rp ro.hardware.euicc true
-
-          # ==========================================================
-          # TELEPHONY
-          # ==========================================================
-
-          rp persist.radio.multisim.config dsds
-
-          rp ro.telephony.default_network 33
-          rp ro.telephony.default_network.0 33
-          rp ro.telephony.default_network.1 33
-
-          # ==========================================================
-          # TREBLE
-          # ==========================================================
-
-          rp ro.treble.enabled true
-          rp ro.vndk.version 36
-
-          # ==========================================================
-          # DISPLAY
-          # ==========================================================
-
-          rp ro.sf.lcd_density 420
-
-          # ==========================================================
-          # USB
-          # ==========================================================
-
-          rp persist.sys.usb.config adb
-          rp persist.sys.usb.configfs 1
-
-          exit 0
-          SH
-
-          chmod 0755 "$ROOT/bin/panther_props.sh"
-          chown 0:2000 "$ROOT/bin/panther_props.sh"
-
-          cat > "$ROOT/etc/init/panther-props.rc" <<'RC'
-          on post-fs-data
-              exec u:r:init:s0 root root -- /system/bin/panther_props.sh
-
-          on boot
-              exec u:r:init:s0 root root -- /system/bin/panther_props.sh
-
-          on property:sys.boot_completed=1
-              exec u:r:init:s0 root root -- /system/bin/panther_props.sh
-
-          on property:sys.boot_completed=0
-              exec u:r:init:s0 root root -- /system/bin/panther_props.sh
-          RC
-
-          chown 0:0 "$ROOT/etc/init/panther-props.rc"
-          chmod 0644 "$ROOT/etc/init/panther-props.rc"
-
-      # ============================================================
-      # 18C. REMOVE CONFLICTING LUNARIS IDENTITY
-      # ============================================================
-
-      - name: "🧹 Remove conflicting GSI device identity"
-        run: |
-          set -euo pipefail
-
-          ROOT="$SYSTEM_ROOT"
-          BP="$ROOT/build.prop"
-
-          python3 - "$BP" <<'PY'
-          import sys
-          from pathlib import Path
-
-          bp = Path(sys.argv[1])
-
-          remove_prefixes = (
-              "ro.product.lunaris.",
-              "ro.product.aosp.",
-          )
-
-          remove_keys = {
-              "ro.product.vendor.device",
-              "ro.product.vendor.name",
-              "ro.product.vendor.model",
-              "ro.product.vendor.brand",
-              "ro.product.vendor.manufacturer",
-          }
-
-          lines = bp.read_text(errors="ignore").splitlines()
-
-          out = []
-
-          for line in lines:
-              if "=" not in line or line.startswith("#"):
-                  out.append(line)
-                  continue
-
-              key = line.split("=", 1)[0]
-
-              if key in remove_keys:
-                  continue
-
-              if key.startswith(remove_prefixes):
-                  continue
-
-              out.append(line)
-
-          bp.write_text("\n".join(out) + "\n")
-          PY
-
-      # ============================================================
-      # 19. INIT SCRIPT
+      # 19. INIT
       # ============================================================
 
       - name: "🚀 Add Panther runtime init"
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -1876,14 +1409,64 @@ jobs:
               exec u:r:init:s0 root root -- /system/bin/panther_props.sh
           RC
 
-          sudo chown 0:0 "$ROOT/etc/init/panther-gsi.rc"
-          sudo chmod 644 "$ROOT/etc/init/panther-gsi.rc"
+          sudo chown 0:0 \
+            "$ROOT/etc/init/panther-gsi.rc"
+
+          sudo chmod 0644 \
+            "$ROOT/etc/init/panther-gsi.rc"
 
       # ============================================================
-      # 20. VINTF VALIDATION
+      # 20. NORMALIZE EVERYTHING
       # ============================================================
 
-      - name: "🧪 Validate Panther VINTF/HAL compatibility"
+      - name: "🔐 Normalize patched system permissions"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          W="$GITHUB_WORKSPACE/workspace"
+          ROOT="$SYSTEM_ROOT"
+
+          # This is the second protection against the exact
+          # Permission denied error from the previous workflow.
+
+          sudo chown -R "$(id -u):$(id -g)" "$W/patched/mnt"
+
+          # System image files need to be readable during packaging.
+          sudo find "$W/patched/mnt" \
+            -type f \
+            -exec chmod u+r {} +
+
+          sudo chmod u+rw "$ROOT/build.prop"
+
+          # Files we created should have Android-readable permissions.
+          for f in \
+            "$ROOT/build.prop" \
+            "$ROOT/etc/permissions/"*.xml \
+            "$ROOT/etc/sysconfig/"*.xml \
+            "$ROOT/etc/init/"*.rc \
+            "$ROOT/bin/panther_props.sh"; do
+
+            [ -f "$f" ] || continue
+
+            sudo chmod 0644 "$f" || true
+          done
+
+          sudo chmod 0755 \
+            "$ROOT/bin/panther_props.sh"
+
+          echo "Final build.prop permissions:"
+          ls -l "$ROOT/build.prop"
+
+          echo "Testing readability:"
+          test -r "$ROOT/build.prop"
+
+      # ============================================================
+      # 21. VALIDATE VINTF / PROPERTIES
+      # ============================================================
+
+      - name: "🧪 Validate Panther compatibility"
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -1891,49 +1474,55 @@ jobs:
           ROOT="$SYSTEM_ROOT"
 
           {
-            echo "===== LUNARIS/PANTHER COMPATIBILITY ====="
+            echo "===== LUNARIS / PANTHER COMPATIBILITY ====="
             echo
+
             echo "Target:"
-            echo "  Device: $TARGET_DEVICE"
-            echo "  Model: $TARGET_MODEL"
-            echo "  Platform: $TARGET_PLATFORM"
-            echo "  Android: $TARGET_ANDROID"
-            echo "  SDK: $TARGET_SDK"
-            echo "  Build: $TARGET_BUILD"
-            echo "  Fingerprint: $TARGET_FINGERPRINT"
+            echo "  Device:      $TARGET_DEVICE"
+            echo "  Model:       $TARGET_MODEL"
+            echo "  Platform:    $TARGET_PLATFORM"
+            echo "  Android:     $TARGET_ANDROID"
+            echo "  SDK:         $TARGET_SDK"
+            echo "  Build:       $TARGET_BUILD"
+            echo "  Patch:       $TARGET_PATCH"
             echo
 
-            echo "GSI properties:"
+            echo "===== BUILD PROPERTIES ====="
+
             grep -E \
-              '^(ro\.build\.version|ro\.product\.|ro\.build\.fingerprint)' \
-              "$ROOT/build.prop" \
-              | head -80 || true
+              '^(ro\.product\.|ro\.build\.|ro\.hardware|ro\.board\.platform|ro\.vendor\.api_level|ro\.treble)' \
+              "$ROOT/build.prop" |
+              head -150 ||
+              true
 
             echo
-            echo "Vendor VINTF:"
-            find "$W/extracted/vendor/vintf" \
+            echo "===== VENDOR VINTF ====="
+
+            find "$W/extracted/vendor/etc/vintf" \
               -type f \
-              -maxdepth 2 \
               -print \
-              2>/dev/null \
-              | sort || true
+              2>/dev/null |
+              sort ||
+              true
 
             echo
-            echo "ODM VINTF:"
-            find "$W/extracted/odm/vintf" \
+            echo "===== ODM VINTF ====="
+
+            find "$W/extracted/odm/etc/vintf" \
               -type f \
-              -maxdepth 2 \
               -print \
-              2>/dev/null \
-              | sort || true
+              2>/dev/null |
+              sort ||
+              true
 
           } | tee "$W/logs/panther-compatibility.txt"
 
       # ============================================================
-      # 21. FACTORY FIRMWARE BUNDLE
+      # 22. BUILD FIRMWARE BUNDLE
       # ============================================================
 
       - name: "📦 Build matching Panther firmware bundle"
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -1943,7 +1532,6 @@ jobs:
 
           mkdir -p "$B"
 
-          # These stay stock.
           for p in \
             boot \
             init_boot \
@@ -1975,14 +1563,19 @@ jobs:
 
           SYSTEM="$(realpath "${1:-system.img}")"
 
-          fastboot getvar product 2>&1 |
-            grep -qi panther ||
-            {
-              echo "ERROR: device is not Pixel 7 / panther"
-              exit 1
-            }
+          PRODUCT="$(
+            fastboot getvar product 2>&1 |
+            sed -n 's/.*product: //p' |
+            head -n1
+          )"
 
-          echo "Flashing matching Panther boot chain..."
+          if [ "$PRODUCT" != "panther" ]; then
+            echo "ERROR: Expected Pixel 7 panther."
+            echo "Detected product: $PRODUCT"
+            exit 1
+          fi
+
+          echo "Pixel 7 panther confirmed."
 
           for p in \
             boot \
@@ -1992,8 +1585,12 @@ jobs:
             dtbo \
             pvmfw; do
 
-            [ -f "$p.img" ] &&
-              fastboot flash --slot=all "$p" "$p.img"
+            if [ -f "$p.img" ]; then
+              fastboot flash \
+                --slot=all \
+                "$p" \
+                "$p.img"
+            fi
           done
 
           if [ -f vbmeta.img ]; then
@@ -2005,9 +1602,16 @@ jobs:
               vbmeta.img
           fi
 
-          for p in vbmeta_system vbmeta_vendor; do
-            [ -f "$p.img" ] &&
-              fastboot flash --slot=all "$p" "$p.img"
+          for p in \
+            vbmeta_system \
+            vbmeta_vendor; do
+
+            if [ -f "$p.img" ]; then
+              fastboot flash \
+                --slot=all \
+                "$p" \
+                "$p.img"
+            fi
           done
 
           fastboot reboot fastboot
@@ -2021,14 +1625,15 @@ jobs:
             odm \
             odm_dlkm; do
 
-            [ -f "$p.img" ] &&
+            if [ -f "$p.img" ]; then
               fastboot flash "$p" "$p.img"
+            fi
           done
 
           fastboot flash system "$SYSTEM"
 
           echo
-          echo "Wiping userdata because this changes framework/security state..."
+          echo "Wiping userdata..."
           fastboot -w
 
           fastboot reboot
@@ -2037,24 +1642,35 @@ jobs:
           chmod +x "$B/flash_all.sh"
 
           cat > "$B/README.txt" <<EOF
-          Lunaris Android 16 → Google Pixel 7 Panther
+          Lunaris Android 16 -> Pixel 7 Panther
 
-          Hardware baseline:
-            Device: panther
-            Model: Pixel 7
-            Platform: gs201
-            Build: BP4A.251205.006
-            SDK: 36
+          Device:
+            panther
+
+          Model:
+            Pixel 7
+
+          Platform:
+            gs201
+
+          Android:
+            16
+
+          SDK:
+            36
+
+          Build:
+            BP4A.251205.006
+
+          System:
+            Modified Lunaris GSI
+
+          Other partitions:
+            Matching stock Panther factory partitions
 
           IMPORTANT:
-            This bundle uses the matching Panther boot/vendor stack.
-            The Lunaris system image is the only modified major partition.
-
-          Flash:
-            ./flash_all.sh system.img
-
-          This wipes userdata.
-          Bootloader must be unlocked.
+            Bootloader must be unlocked.
+            This package wipes userdata.
           EOF
 
           cd "$B"
@@ -2064,14 +1680,16 @@ jobs:
             .
 
       # ============================================================
-      # 22. FINAL IMAGE
+      # 23. FINALIZE SYSTEM IMAGE
       # ============================================================
 
       - name: "📦 Finalize system image"
+        shell: bash
         run: |
           set -euo pipefail
 
           W="$GITHUB_WORKSPACE/workspace"
+
           IMG="$W/patched/system.img"
           OUT="$W/output/${{ inputs.output_name }}.img"
 
@@ -2091,6 +1709,11 @@ jobs:
             awk '/^Block size:/{print $3}'
           )"
 
+          if [ -z "$BLOCKS" ] || [ -z "$BSIZE" ]; then
+            echo "::error::Could not determine final ext4 size"
+            exit 1
+          fi
+
           truncate \
             -s $((BLOCKS * BSIZE)) \
             "$IMG"
@@ -2098,23 +1721,27 @@ jobs:
           mv "$IMG" "$OUT"
 
           case "${{ inputs.fs_type }}" in
+
             ext4)
               ;;
+
             erofs)
-              mkdir -p "$W/patched/erofs"
+              EROFS_DIR="$W/patched/erofs"
+
+              sudo mkdir -p "$EROFS_DIR"
 
               sudo mount \
                 -o loop,ro \
                 "$OUT" \
-                "$W/patched/erofs"
+                "$EROFS_DIR"
 
               sudo mkfs.erofs \
                 -zlz4hc \
                 -C16384 \
                 "$W/output/${{ inputs.output_name }}.erofs.img" \
-                "$W/patched/erofs"
+                "$EROFS_DIR"
 
-              sudo umount "$W/patched/erofs"
+              sudo umount "$EROFS_DIR"
 
               rm -f "$OUT"
 
@@ -2122,15 +1749,24 @@ jobs:
                 "$W/output/${{ inputs.output_name }}.erofs.img" \
                 "$OUT"
               ;;
+
+            *)
+              echo "::error::Unsupported filesystem: ${{ inputs.fs_type }}"
+              exit 1
+              ;;
           esac
 
-          xz -T0 -6 "$OUT"
+          xz \
+            -T0 \
+            -6 \
+            "$OUT"
 
       # ============================================================
-      # 23. VALIDATION
+      # 24. FINAL VALIDATION
       # ============================================================
 
       - name: "🧪 Final validation"
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -2138,14 +1774,14 @@ jobs:
           OUT="$W/output"
 
           IMAGE="$OUT/${{ inputs.output_name }}.img.xz"
+          ZIP="$OUT/${{ inputs.output_name }}-panther-firmware.zip"
 
           test -s "$IMAGE"
-          test -s "$OUT/${{ inputs.output_name }}-panther-firmware.zip"
+          test -s "$ZIP"
 
           xz -t "$IMAGE"
 
-          unzip -t \
-            "$OUT/${{ inputs.output_name }}-panther-firmware.zip"
+          unzip -t "$ZIP"
 
           sha256sum \
             "$OUT"/* \
@@ -2154,11 +1790,17 @@ jobs:
           echo
           echo "===== FINAL BUILD ====="
           ls -lh "$OUT"
+
           echo
+          echo "===== COMPATIBILITY LOG ====="
           cat "$W/logs/panther-compatibility.txt"
 
+          echo
+          echo "===== HARDWARE DETECTION ====="
+          cat "$W/logs/panther-hardware-detection.txt"
+
       # ============================================================
-      # 24. ARTIFACT
+      # 25. ARTIFACT
       # ============================================================
 
       - name: "📤 Upload artifacts"
@@ -2173,12 +1815,13 @@ jobs:
           retention-days: 14
 
       # ============================================================
-      # 25. RELEASE
+      # 26. RELEASE
       # ============================================================
 
       - name: "🏷️ Create release"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -2189,5 +1832,4 @@ jobs:
             workspace/output/*.zip \
             workspace/output/SHA256SUMS.txt \
             workspace/logs/*.txt \
-            --title "${{ inputs.output_name }}" \
-            --generate-notes
+            --title "${{ inputs.output_name }}"
