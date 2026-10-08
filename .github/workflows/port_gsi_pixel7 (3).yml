@@ -1414,7 +1414,7 @@ jobs:
 
           chmod 755 "$ROOT/bin/panther_props.sh"
           sudo chown 0:2000 "$ROOT/bin/panther_props.sh"
-```yaml
+
       # ============================================================
       # 18. EXTENDED RESETPROP RUNTIME COMPATIBILITY
       # ============================================================
