@@ -34,7 +34,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          for cmd in unzip zip findmnt mount umount rsync mkfs.ext4 e2fsck tune2fs python3 simg2img file; do
+          for cmd in findmnt mount umount rsync mkfs.ext4 e2fsck tune2fs python3; do
             command -v "$cmd" >/dev/null || {
               echo "::error::Missing required command: $cmd"
               exit 1
@@ -44,78 +44,57 @@ jobs:
             echo "::error::Missing $WORK_DIR/system.img"
             exit 1
           }
-          test -f "$WORK_DIR/panther-td1a.221105.001-factory-10a338fe.zip" || {
-            echo "::error::Missing TD1A factory ZIP in $WORK_DIR"
+          test -d "$WORK_DIR/td1a" || {
+            echo "::error::Missing unpacked TD1A directory: $WORK_DIR/td1a"
             exit 1
           }
-          test -f "$WORK_DIR/panther-ap3a.241005.015-factory-0418766c.zip" || {
-            echo "::error::Missing AP3A factory ZIP in $WORK_DIR"
+          test -d "$WORK_DIR/ap3a" || {
+            echo "::error::Missing unpacked AP3A directory: $WORK_DIR/ap3a"
             exit 1
           }
           mkdir -p "$OUTPUT_DIR"
           echo "Inputs validated. Output: $OUTPUT_DIR"
 
-      - name: Extract only the nested factory image ZIPs
+      - name: Use existing unpacked TD1A and AP3A files
         shell: bash
         run: |
           set -Eeuo pipefail
-          STAGE="$RUNNER_TEMP/panther-factory"
-          mkdir -p "$STAGE/td1a" "$STAGE/ap3a"
+          TD1A_ROOT="$WORK_DIR/td1a"
+          AP3A_ROOT="$WORK_DIR/ap3a"
 
-          # Do not unpack the entire outer factory ZIP (bootloader, radio,
-          # scripts, and other files). Read its directory and stream only the
-          # nested image*.zip directly to a staging file.
-          extract_image_zip() {
-            local outer="$1" release="$2" nested="$3"
-            local inner="$STAGE/${release}-image.zip"
-            local dest="$STAGE/$release"
-            if ! unzip -Z1 "$outer" | grep -Fxq "$nested"; then
-              echo "::error::Nested image ZIP entry not found: $nested in $outer"
+          # The factory contents are already unpacked by the user. Search those
+          # directories in place; do not extract ZIPs or copy large partition
+          # images into a staging directory.
+          find_partition() {
+            local root="$1" part="$2" result
+            result="$(find "$root" -type f -name "${part}.img" -print -quit)"
+            if [[ -z "$result" || ! -s "$result" ]]; then
+              echo "::error::Could not find a non-empty ${part}.img under $root"
+              echo "Available image files under $root:"
+              find "$root" -type f -name '*.img' -printf '%p (%s bytes)\n' | head -100
               return 1
             fi
-            echo "Extracting nested image ZIP only: $nested"
-            unzip -p "$outer" "$nested" > "$inner"
-            [[ -s "$inner" ]] || { echo "::error::Nested image ZIP was empty: $nested"; return 1; }
-            mkdir -p "$dest"
-            unzip -oq "$inner" -d "$dest"
+            printf '%s' "$result"
           }
 
-          find_image_zip_entry() {
-            local outer="$1"
-            unzip -Z1 "$outer" | grep -Ei '(^|/)image[^/]*\.zip$' | head -n 1 || true
-          }
+          TD1A_VENDOR_IMG="$(find_partition "$TD1A_ROOT" vendor)"
+          AP3A_VENDOR_IMG="$(find_partition "$AP3A_ROOT" vendor)"
+          AP3A_SYSTEM_IMG="$(find_partition "$AP3A_ROOT" system)"
+          AP3A_PRODUCT_IMG="$(find_partition "$AP3A_ROOT" product)"
+          AP3A_SYSTEM_EXT_IMG="$(find_partition "$AP3A_ROOT" system_ext)"
 
-          TD1A_ZIP="$WORK_DIR/panther-td1a.221105.001-factory-10a338fe.zip"
-          AP3A_ZIP="$WORK_DIR/panther-ap3a.241005.015-factory-0418766c.zip"
-          TD1A_INNER="$(find_image_zip_entry "$TD1A_ZIP")"
-          AP3A_INNER="$(find_image_zip_entry "$AP3A_ZIP")"
-          [[ -n "$TD1A_INNER" ]] || { echo "::error::Could not find nested image*.zip in TD1A factory ZIP"; exit 1; }
-          [[ -n "$AP3A_INNER" ]] || { echo "::error::Could not find nested image*.zip in AP3A factory ZIP"; exit 1; }
-          extract_image_zip "$TD1A_ZIP" td1a "$TD1A_INNER"
-          extract_image_zip "$AP3A_ZIP" ap3a "$AP3A_INNER"
+          {
+            echo "TD1A_VENDOR_IMG=$TD1A_VENDOR_IMG"
+            echo "AP3A_VENDOR_IMG=$AP3A_VENDOR_IMG"
+            echo "AP3A_SYSTEM_IMG=$AP3A_SYSTEM_IMG"
+            echo "AP3A_PRODUCT_IMG=$AP3A_PRODUCT_IMG"
+            echo "AP3A_SYSTEM_EXT_IMG=$AP3A_SYSTEM_EXT_IMG"
+          } >> "$GITHUB_ENV"
 
-          # Find partition images regardless of nested directory layout.
-          for release in td1a ap3a; do
-            root="$STAGE/$release"
-            for part in vendor system product system_ext; do
-              found="$(find "$root" -type f -name "${part}.img" -print -quit)"
-              if [[ -n "$found" ]]; then
-                cp -f "$found" "$STAGE/${release}-${part}.img"
-              fi
-            done
-          done
-
-          for required in "$STAGE/td1a-vendor.img" "$STAGE/ap3a-vendor.img" \
-                          "$STAGE/ap3a-system.img" "$STAGE/ap3a-product.img" \
-                          "$STAGE/ap3a-system_ext.img"; do
-            if [[ ! -s "$required" ]]; then
-              echo "::error::Could not locate required partition image: $required"
-              echo "Factory image layout:"
-              find "$STAGE" -type f -name '*.img' -printf '%p (%s bytes)\n' | head -100
-              exit 1
-            fi
-          done
-          echo "FACTORY_STAGE=$STAGE" >> "$GITHUB_ENV"
+          echo "Using existing unpacked images directly (no ZIP extraction or image staging copy)."
+          printf 'TD1A vendor: %s\nAP3A vendor: %s\nAP3A system: %s\nAP3A product: %s\nAP3A system_ext: %s\n' \
+            "$TD1A_VENDOR_IMG" "$AP3A_VENDOR_IMG" "$AP3A_SYSTEM_IMG" \
+            "$AP3A_PRODUCT_IMG" "$AP3A_SYSTEM_EXT_IMG"
 
       - name: Prepare privileged mount workspace
         shell: bash
@@ -155,9 +134,9 @@ jobs:
           sudo mount -o loop "$OUT" "$MNT/dst"
           sudo rsync -aH --numeric-ids "$MNT/src/" "$MNT/dst/"
 
-          sudo mount -o loop,ro "$FACTORY_STAGE/ap3a-system.img" "$MNT/ap3a_system"
-          sudo mount -o loop,ro "$FACTORY_STAGE/ap3a-product.img" "$MNT/ap3a_product"
-          sudo mount -o loop,ro "$FACTORY_STAGE/ap3a-system_ext.img" "$MNT/ap3a_system_ext"
+          sudo mount -o loop,ro "$AP3A_SYSTEM_IMG" "$MNT/ap3a_system"
+          sudo mount -o loop,ro "$AP3A_PRODUCT_IMG" "$MNT/ap3a_product"
+          sudo mount -o loop,ro "$AP3A_SYSTEM_EXT_IMG" "$MNT/ap3a_system_ext"
 
           # Copy only absent AP3A files whose path or filename clearly indicates
           # eSIM/eUICC, Wi-Fi, or lock-screen/Keyguard functionality. Do not
@@ -242,8 +221,8 @@ jobs:
           }
           trap cleanup_vendor EXIT
 
-          sudo mount -o loop,ro "$FACTORY_STAGE/td1a-vendor.img" "$MNT/td1a_vendor"
-          sudo mount -o loop,ro "$FACTORY_STAGE/ap3a-vendor.img" "$MNT/ap3a_vendor"
+          sudo mount -o loop,ro "$TD1A_VENDOR_IMG" "$MNT/td1a_vendor"
+          sudo mount -o loop,ro "$AP3A_VENDOR_IMG" "$MNT/ap3a_vendor"
           sudo mount -o loop "$OUT" "$MNT/dst"
 
           # Keep TD1A vendor files as the base. The source vendor is read-only.
