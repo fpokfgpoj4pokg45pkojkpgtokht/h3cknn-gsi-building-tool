@@ -162,14 +162,30 @@ jobs:
           # radio modes, or security-provider properties.
           if [[ -f "$MNT/dst/system/build.prop" ]]; then
             sudo cp -a "$MNT/dst/system/build.prop" "$MNT/dst/system/build.prop.pre-panther-merge"
-            sudo tee -a "$MNT/dst/system/build.prop" >/dev/null <<'PROPS'
-# Panther GSI compatibility defaults (review against the ROM/vendor before use)
-ro.product.device=panther
-ro.product.name=panther
-ro.product.board=gs201
-PROPS
+          # Add only missing identity properties; avoid duplicate build.prop keys.
+          if [[ -f "$MNT/dst/system/build.prop" ]]; then
+            for pair in \
+              "ro.product.device=panther" \
+              "ro.product.name=panther" \
+              "ro.product.board=gs201"; do
+              key="${pair%%=*}"
+
+              if ! sudo grep -qE "^[[:space:]]*${key}=" \
+                  "$MNT/dst/system/build.prop"; then
+                printf '%s\n' "$pair" |
+                  sudo tee -a "$MNT/dst/system/build.prop" >/dev/null
+              fi
+            done
           fi
 
+          sudo sync
+          cleanup
+          trap - EXIT
+          sudo e2fsck -fy "$OUT"
+          sudo tune2fs -l "$OUT" |
+            grep -E 'Filesystem volume name|Filesystem features|Block count|Block size'
+          stat -c 'system-new.img size: %s bytes' "$OUT"
+  
           sudo sync
           cleanup
           trap - EXIT
