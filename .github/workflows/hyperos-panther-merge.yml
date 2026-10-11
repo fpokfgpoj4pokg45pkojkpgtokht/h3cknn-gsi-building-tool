@@ -55,27 +55,44 @@ jobs:
           mkdir -p "$OUTPUT_DIR"
           echo "Inputs validated. Output: $OUTPUT_DIR"
 
-      - name: Extract nested factory image ZIPs
+      - name: Extract only the nested factory image ZIPs
         shell: bash
         run: |
           set -Eeuo pipefail
           STAGE="$RUNNER_TEMP/panther-factory"
           mkdir -p "$STAGE/td1a" "$STAGE/ap3a"
-          unzip -oq "$WORK_DIR/panther-td1a.221105.001-factory-10a338fe.zip" -d "$STAGE/td1a"
-          unzip -oq "$WORK_DIR/panther-ap3a.241005.015-factory-0418766c.zip" -d "$STAGE/ap3a"
 
-          # Factory ZIPs contain a second image ZIP. Extract those as well.
-          while IFS= read -r -d '' nested; do
-            dest="${nested%.zip}-contents"
+          # Do not unpack the entire outer factory ZIP (bootloader, radio,
+          # scripts, and other files). Read its directory and stream only the
+          # nested image*.zip directly to a staging file.
+          extract_image_zip() {
+            local outer="$1" release="$2" nested="$3"
+            local inner="$STAGE/${release}-image.zip"
+            local dest="$STAGE/$release"
+            if ! unzip -Z1 "$outer" | grep -Fxq "$nested"; then
+              echo "::error::Nested image ZIP entry not found: $nested in $outer"
+              return 1
+            fi
+            echo "Extracting nested image ZIP only: $nested"
+            unzip -p "$outer" "$nested" > "$inner"
+            [[ -s "$inner" ]] || { echo "::error::Nested image ZIP was empty: $nested"; return 1; }
             mkdir -p "$dest"
-            unzip -oq "$nested" -d "$dest"
-          done < <(find "$STAGE/td1a" -type f -name '*.zip' -print0)
+            unzip -oq "$inner" -d "$dest"
+          }
 
-          while IFS= read -r -d '' nested; do
-            dest="${nested%.zip}-contents"
-            mkdir -p "$dest"
-            unzip -oq "$nested" -d "$dest"
-          done < <(find "$STAGE/ap3a" -type f -name '*.zip' -print0)
+          find_image_zip_entry() {
+            local outer="$1"
+            unzip -Z1 "$outer" | grep -Ei '(^|/)image[^/]*\.zip$' | head -n 1 || true
+          }
+
+          TD1A_ZIP="$WORK_DIR/panther-td1a.221105.001-factory-10a338fe.zip"
+          AP3A_ZIP="$WORK_DIR/panther-ap3a.241005.015-factory-0418766c.zip"
+          TD1A_INNER="$(find_image_zip_entry "$TD1A_ZIP")"
+          AP3A_INNER="$(find_image_zip_entry "$AP3A_ZIP")"
+          [[ -n "$TD1A_INNER" ]] || { echo "::error::Could not find nested image*.zip in TD1A factory ZIP"; exit 1; }
+          [[ -n "$AP3A_INNER" ]] || { echo "::error::Could not find nested image*.zip in AP3A factory ZIP"; exit 1; }
+          extract_image_zip "$TD1A_ZIP" td1a "$TD1A_INNER"
+          extract_image_zip "$AP3A_ZIP" ap3a "$AP3A_INNER"
 
           # Find partition images regardless of nested directory layout.
           for release in td1a ap3a; do
