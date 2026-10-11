@@ -1,0 +1,272 @@
+name: "HyperOS Treble → Pixel 7 Panther (TD1A base + AP3A compatibility merge)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      work_dir:
+        description: "Directory containing system.img and both factory ZIPs"
+        required: true
+        type: string
+        default: "/home/sal/_work"
+      output_dir:
+        description: "Output directory on the self-hosted runner"
+        required: true
+        type: string
+        default: "/home/sal/_work/panther-merged-output"
+
+permissions:
+  contents: read
+
+jobs:
+  merge-panther:
+    # Run on your own Ubuntu PC, where /home/sal/_work already exists.
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 180
+
+    env:
+      WORK_DIR: ${{ inputs.work_dir }}
+      OUTPUT_DIR: ${{ inputs.output_dir }}
+      SYSTEM_BYTES: "8375186227"
+      VENDOR_BYTES: "838860800"
+
+    steps:
+      - name: Check inputs and install required tools
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for cmd in unzip zip findmnt mount umount rsync mkfs.ext4 e2fsck tune2fs python3 simg2img file; do
+            command -v "$cmd" >/dev/null || {
+              echo "::error::Missing required command: $cmd"
+              exit 1
+            }
+          done
+          test -f "$WORK_DIR/system.img" || {
+            echo "::error::Missing $WORK_DIR/system.img"
+            exit 1
+          }
+          test -f "$WORK_DIR/panther-td1a.221105.001-factory-10a338fe.zip" || {
+            echo "::error::Missing TD1A factory ZIP in $WORK_DIR"
+            exit 1
+          }
+          test -f "$WORK_DIR/panther-ap3a.241005.015-factory-0418766c.zip" || {
+            echo "::error::Missing AP3A factory ZIP in $WORK_DIR"
+            exit 1
+          }
+          mkdir -p "$OUTPUT_DIR"
+          echo "Inputs validated. Output: $OUTPUT_DIR"
+
+      - name: Extract nested factory image ZIPs
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          STAGE="$RUNNER_TEMP/panther-factory"
+          mkdir -p "$STAGE/td1a" "$STAGE/ap3a"
+          unzip -oq "$WORK_DIR/panther-td1a.221105.001-factory-10a338fe.zip" -d "$STAGE/td1a"
+          unzip -oq "$WORK_DIR/panther-ap3a.241005.015-factory-0418766c.zip" -d "$STAGE/ap3a"
+
+          # Factory ZIPs contain a second image ZIP. Extract those as well.
+          while IFS= read -r -d '' nested; do
+            dest="${nested%.zip}-contents"
+            mkdir -p "$dest"
+            unzip -oq "$nested" -d "$dest"
+          done < <(find "$STAGE/td1a" -type f -name '*.zip' -print0)
+
+          while IFS= read -r -d '' nested; do
+            dest="${nested%.zip}-contents"
+            mkdir -p "$dest"
+            unzip -oq "$nested" -d "$dest"
+          done < <(find "$STAGE/ap3a" -type f -name '*.zip' -print0)
+
+          # Find partition images regardless of nested directory layout.
+          for release in td1a ap3a; do
+            root="$STAGE/$release"
+            for part in vendor system product system_ext; do
+              found="$(find "$root" -type f -name "${part}.img" -print -quit)"
+              if [[ -n "$found" ]]; then
+                cp -f "$found" "$STAGE/${release}-${part}.img"
+              fi
+            done
+          done
+
+          for required in "$STAGE/td1a-vendor.img" "$STAGE/ap3a-vendor.img" \
+                          "$STAGE/ap3a-system.img" "$STAGE/ap3a-product.img" \
+                          "$STAGE/ap3a-system_ext.img"; do
+            if [[ ! -s "$required" ]]; then
+              echo "::error::Could not locate required partition image: $required"
+              echo "Factory image layout:"
+              find "$STAGE" -type f -name '*.img' -printf '%p (%s bytes)\n' | head -100
+              exit 1
+            fi
+          done
+          echo "FACTORY_STAGE=$STAGE" >> "$GITHUB_ENV"
+
+      - name: Prepare privileged mount workspace
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # Mounting loopback images requires root. This workflow intentionally
+          # uses sudo only for mount/mkfs operations; source files are not altered.
+          sudo -n true || {
+            echo "::error::The self-hosted runner user needs passwordless sudo for mount, umount, and mkfs.ext4."
+            echo "Configure narrowly scoped sudo permissions for these commands, or run the runner under an appropriate account."
+            exit 1
+          }
+          mkdir -p "$RUNNER_TEMP/panther-mnt"/{src,dst,td1a_vendor,ap3a_vendor,ap3a_system,ap3a_product,ap3a_system_ext}
+          echo "MNT=$RUNNER_TEMP/panther-mnt" >> "$GITHUB_ENV"
+
+      - name: Build system-new.img (7.8 GiB ext4) and conservatively merge AP3A files
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SRC="$WORK_DIR/system.img"
+          OUT="$OUTPUT_DIR/system-new.img"
+          MNT="$RUNNER_TEMP/panther-mnt"
+
+          # Never write to the original GSI. Verify its filesystem first.
+          sudo e2fsck -fn "$SRC" || true
+          truncate -s "$SYSTEM_BYTES" "$OUT"
+          sudo mkfs.ext4 -F -L panther_system_new "$OUT"
+
+          cleanup() {
+            set +e
+            for p in "$MNT/ap3a_system_ext" "$MNT/ap3a_product" "$MNT/ap3a_system" "$MNT/dst" "$MNT/src"; do
+              mountpoint -q "$p" && sudo umount "$p"
+            done
+          }
+          trap cleanup EXIT
+
+          sudo mount -o loop,ro "$SRC" "$MNT/src"
+          sudo mount -o loop "$OUT" "$MNT/dst"
+          sudo rsync -aH --numeric-ids "$MNT/src/" "$MNT/dst/"
+
+          # Mount AP3A partitions read-only. Merge only files that do not
+          # already exist in HyperOS, so HyperOS framework files are not replaced.
+          sudo mount -o loop,ro "$FACTORY_STAGE/ap3a-system.img" "$MNT/ap3a_system"
+          sudo mount -o loop,ro "$FACTORY_STAGE/ap3a-product.img" "$MNT/ap3a_product"
+          sudo mount -o loop,ro "$FACTORY_STAGE/ap3a-system_ext.img" "$MNT/ap3a_system_ext"
+
+          for spec in \
+            "$MNT/ap3a_system|$MNT/dst/system" \
+            "$MNT/ap3a_product|$MNT/dst/product" \
+            "$MNT/ap3a_system_ext|$MNT/dst/system_ext"; do
+            from="${spec%%|*}"
+            to="${spec#*|}"
+            if [[ -d "$to" ]]; then
+              sudo rsync -aH --numeric-ids --ignore-existing "$from/" "$to/"
+            else
+              echo "Destination $to is absent; skipping this partition overlay."
+            fi
+          done
+
+          # Stable, low-risk property defaults. Do not force fake device identity,
+          # radio modes, or security-provider properties.
+          if [[ -f "$MNT/dst/system/build.prop" ]]; then
+            sudo cp -a "$MNT/dst/system/build.prop" "$MNT/dst/system/build.prop.pre-panther-merge"
+            sudo tee -a "$MNT/dst/system/build.prop" >/dev/null <<'PROPS'
+# Panther GSI compatibility defaults (review against the ROM/vendor before use)
+ro.product.device=panther
+ro.product.name=panther
+ro.product.board=gs201
+PROPS
+          fi
+
+          sudo sync
+          cleanup
+          trap - EXIT
+          sudo e2fsck -fy "$OUT"
+          sudo tune2fs -l "$OUT" | grep -E 'Filesystem volume name|Filesystem features|Block count|Block size'
+          stat -c 'system-new.img size: %s bytes' "$OUT"
+
+      - name: Build vendor-new.img (800 MiB ext4) from TD1A vendor
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT="$OUTPUT_DIR/vendor-new.img"
+          MNT="$RUNNER_TEMP/panther-mnt"
+          truncate -s "$VENDOR_BYTES" "$OUT"
+          sudo mkfs.ext4 -F -L panther_vendor_new "$OUT"
+
+          cleanup_vendor() {
+            set +e
+            mountpoint -q "$MNT/ap3a_vendor" && sudo umount "$MNT/ap3a_vendor"
+            mountpoint -q "$MNT/td1a_vendor" && sudo umount "$MNT/td1a_vendor"
+            mountpoint -q "$MNT/dst" && sudo umount "$MNT/dst"
+          }
+          trap cleanup_vendor EXIT
+
+          sudo mount -o loop,ro "$FACTORY_STAGE/td1a-vendor.img" "$MNT/td1a_vendor"
+          sudo mount -o loop,ro "$FACTORY_STAGE/ap3a-vendor.img" "$MNT/ap3a_vendor"
+          sudo mount -o loop "$OUT" "$MNT/dst"
+
+          # Keep TD1A vendor files as the base. The source vendor is read-only.
+          sudo rsync -aH --numeric-ids "$MNT/td1a_vendor/" "$MNT/dst/"
+
+          # AP3A vendor binaries and init/VINTF files are deliberately NOT copied
+          # wholesale: cross-release vendor mixing is a common cause of bootloops.
+          # Add only absent, clearly named eUICC support files if present. Do not
+          # overwrite any TD1A files and do not import AP3A init scripts/manifests.
+          sudo python3 - "$MNT/ap3a_vendor" "$MNT/dst" <<'PY'
+          import os, sys, shutil
+          src, dst = sys.argv[1:3]
+          allowed_dirs = ("etc/permissions", "etc/sysconfig")
+          tokens = ("euicc", "esim")
+          copied = []
+          for relbase in allowed_dirs:
+              base = os.path.join(src, relbase)
+              if not os.path.isdir(base):
+                  continue
+              for root, dirs, files in os.walk(base):
+                  for name in files:
+                      if not any(token in name.lower() for token in tokens):
+                          continue
+                      s = os.path.join(root, name)
+                      rel = os.path.relpath(s, src)
+                      d = os.path.join(dst, rel)
+                      if os.path.exists(d):
+                          continue
+                      os.makedirs(os.path.dirname(d), exist_ok=True)
+                      shutil.copy2(s, d)
+                      copied.append(rel)
+          print("AP3A eUICC metadata copied (only if absent):")
+          print("\\n".join(copied) if copied else "(none found; no vendor files added)")
+          PY
+
+          sudo sync
+          cleanup_vendor
+          trap - EXIT
+          sudo e2fsck -fy "$OUT"
+          sudo tune2fs -l "$OUT" | grep -E 'Filesystem volume name|Filesystem features|Block count|Block size'
+          stat -c 'vendor-new.img size: %s bytes' "$OUT"
+
+      - name: Write merge report and checksums
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          {
+            echo "Panther HyperOS Treble merge report"
+            echo "Generated: $(date -u +%FT%TZ)"
+            echo "Base GSI: $WORK_DIR/system.img"
+            echo "TD1A base: panther-td1a.221105.001"
+            echo "AP3A donor: panther-ap3a.241005.015"
+            echo "system-new.img requested size: $SYSTEM_BYTES bytes"
+            echo "vendor-new.img requested size: $VENDOR_BYTES bytes"
+            echo
+            echo "Important: this workflow uses an additive-only AP3A overlay for system/product/system_ext."
+            echo "Existing HyperOS files are not overwritten. Vendor uses TD1A as the base and only"
+            echo "adds absent eUICC-named metadata files from AP3A etc/permissions and etc/sysconfig."
+            echo "No boot-critical images are modified. eSIM and lock-screen operation are not guaranteed."
+            echo
+            ls -lh "$OUTPUT_DIR/system-new.img" "$OUTPUT_DIR/vendor-new.img"
+            sha256sum "$OUTPUT_DIR/system-new.img" "$OUTPUT_DIR/vendor-new.img"
+          } | tee "$OUTPUT_DIR/merge-report.txt"
+
+      - name: Upload merged images
+        uses: actions/upload-artifact@v4
+        with:
+          name: panther-hyperos-merged-images
+          path: |
+            ${{ inputs.output_dir }}/system-new.img
+            ${{ inputs.output_dir }}/vendor-new.img
+            ${{ inputs.output_dir }}/merge-report.txt
+          if-no-files-found: error
+          retention-days: 14
