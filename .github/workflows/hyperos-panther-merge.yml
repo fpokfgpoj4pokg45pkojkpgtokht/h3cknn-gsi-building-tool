@@ -114,91 +114,106 @@ jobs:
           mkdir -p "$RUNNER_TEMP/panther-mnt"/{src,dst,td1a_vendor,ap3a_vendor,ap3a_system,ap3a_product,ap3a_system_ext}
           echo "MNT=$RUNNER_TEMP/panther-mnt" >> "$GITHUB_ENV"
 
-      - name: Build system-new.img (7.8 GiB ext4) and conservatively merge AP3A files
+      - name: Build system-new.img with targeted AP3A capability files
         shell: bash
         run: |
           set -Eeuo pipefail
           SRC="$WORK_DIR/system.img"
-          OUT="$OUTPUT_DIR/system-new.img"
+          FINAL="$OUTPUT_DIR/system-new.img"
+          OUT="$OUTPUT_DIR/.system-new.img.building.$$"
           MNT="$RUNNER_TEMP/panther-mnt"
 
-          # Never write to the original GSI. Verify its filesystem first.
+          # Never truncate an existing final image or reuse a stale build file.
+          if [[ -e "$FINAL" || -e "$OUT" ]]; then
+            echo "::error::Refusing to overwrite existing $FINAL or build file $OUT"
+            exit 1
+          fi
+
           sudo e2fsck -fn "$SRC" || true
+          trap 'set +e; for p in "$MNT/ap3a_system_ext" "$MNT/ap3a_product" "$MNT/ap3a_system" "$MNT/dst" "$MNT/src"; do mountpoint -q "$p" && sudo umount "$p"; done' EXIT
+
           truncate -s "$SYSTEM_BYTES" "$OUT"
           sudo mkfs.ext4 -F -L panther_system_new "$OUT"
-
-          cleanup() {
-            set +e
-            for p in "$MNT/ap3a_system_ext" "$MNT/ap3a_product" "$MNT/ap3a_system" "$MNT/dst" "$MNT/src"; do
-              mountpoint -q "$p" && sudo umount "$p"
-            done
-          }
-          trap cleanup EXIT
-
           sudo mount -o loop,ro "$SRC" "$MNT/src"
           sudo mount -o loop "$OUT" "$MNT/dst"
           sudo rsync -aH --numeric-ids "$MNT/src/" "$MNT/dst/"
 
-          # Mount AP3A partitions read-only. Merge only files that do not
-          # already exist in HyperOS, so HyperOS framework files are not replaced.
           sudo mount -o loop,ro "$FACTORY_STAGE/ap3a-system.img" "$MNT/ap3a_system"
           sudo mount -o loop,ro "$FACTORY_STAGE/ap3a-product.img" "$MNT/ap3a_product"
           sudo mount -o loop,ro "$FACTORY_STAGE/ap3a-system_ext.img" "$MNT/ap3a_system_ext"
 
-          for spec in \
-            "$MNT/ap3a_system|$MNT/dst/system" \
-            "$MNT/ap3a_product|$MNT/dst/product" \
-            "$MNT/ap3a_system_ext|$MNT/dst/system_ext"; do
-            from="${spec%%|*}"
-            to="${spec#*|}"
-            if [[ -d "$to" ]]; then
-              sudo rsync -aH --numeric-ids --ignore-existing "$from/" "$to/"
-            else
-              echo "Destination $to is absent; skipping this partition overlay."
-            fi
-          done
+          # Copy only absent AP3A files whose path or filename clearly indicates
+          # eSIM/eUICC, Wi-Fi, or lock-screen/Keyguard functionality. Do not
+          # overlay whole partitions or overwrite HyperOS files.
+          sudo python3 - "$MNT/ap3a_system" "$MNT/ap3a_product" "$MNT/ap3a_system_ext" "$MNT/dst" <<'PY'
+          import os, sys, shutil
+          sources, dst = sys.argv[1:4], sys.argv[4]
+          dest_parts = ("system", "product", "system_ext")
+          tokens = ("euicc", "esim", "wifi", "wlan", "keyguard", "lockscreen", "lock_screen")
+          copied, skipped = [], []
+          for src, part in zip(sources, dest_parts):
+              for root, dirs, files in os.walk(src):
+                  # Avoid scanning obvious non-runtime bulk content.
+                  dirs[:] = [d for d in dirs if d not in (".git", "lost+found")]
+                  for name in files:
+                      source = os.path.join(root, name)
+                      rel = os.path.relpath(source, src)
+                      searchable = (rel + "/" + name).lower()
+                      if not any(token in searchable for token in tokens):
+                          continue
+                      target = os.path.join(dst, part, rel)
+                      rel_target = os.path.join(part, rel)
+                      if os.path.lexists(target):
+                          skipped.append(rel_target)
+                          continue
+                      os.makedirs(os.path.dirname(target), exist_ok=True)
+                      shutil.copy2(source, target, follow_symlinks=False)
+                      copied.append(rel_target)
+          print("Targeted AP3A capability files copied:")
+          print("\\n".join(sorted(set(copied))) if copied else "(none found)")
+          print(f"Existing HyperOS paths preserved: {len(skipped)}")
+          PY
 
-          # Stable, low-risk property defaults. Do not force fake device identity,
-          # radio modes, or security-provider properties.
+          # Add missing identity defaults only; keep original build.prop backed up
+          # inside the image and avoid duplicate keys.
           if [[ -f "$MNT/dst/system/build.prop" ]]; then
             sudo cp -a "$MNT/dst/system/build.prop" "$MNT/dst/system/build.prop.pre-panther-merge"
-          # Add only missing identity properties; avoid duplicate build.prop keys.
-          if [[ -f "$MNT/dst/system/build.prop" ]]; then
-            for pair in \
-              "ro.product.device=panther" \
-              "ro.product.name=panther" \
-              "ro.product.board=gs201"; do
+            for pair in "ro.product.device=panther" "ro.product.name=panther" "ro.product.board=gs201"; do
               key="${pair%%=*}"
-
-              if ! sudo grep -qE "^[[:space:]]*${key}=" \
-                  "$MNT/dst/system/build.prop"; then
-                printf '%s\n' "$pair" |
-                  sudo tee -a "$MNT/dst/system/build.prop" >/dev/null
+              if ! sudo grep -qE "^[[:space:]]*${key}=" "$MNT/dst/system/build.prop"; then
+                printf '%s\\n' "$pair" | sudo tee -a "$MNT/dst/system/build.prop" >/dev/null
               fi
             done
           fi
 
           sudo sync
-          cleanup
-          trap - EXIT
-          sudo e2fsck -fy "$OUT"
-          sudo tune2fs -l "$OUT" |
-            grep -E 'Filesystem volume name|Filesystem features|Block count|Block size'
-          stat -c 'system-new.img size: %s bytes' "$OUT"
-  
-          sudo sync
-          cleanup
-          trap - EXIT
+          for p in "$MNT/ap3a_system_ext" "$MNT/ap3a_product" "$MNT/ap3a_system" "$MNT/dst" "$MNT/src"; do
+            mountpoint -q "$p" && sudo umount "$p"
+          done
           sudo e2fsck -fy "$OUT"
           sudo tune2fs -l "$OUT" | grep -E 'Filesystem volume name|Filesystem features|Block count|Block size'
-          stat -c 'system-new.img size: %s bytes' "$OUT"
+          stat -c 'system-new.img build size: %s bytes' "$OUT"
+          # Publish only after validation. Do not replace an existing final file.
+          if [[ -e "$FINAL" ]]; then
+            echo "::error::Output appeared during build; keeping build at $OUT"
+            exit 1
+          fi
+          mv -n "$OUT" "$FINAL"
+          [[ -f "$FINAL" ]] || { echo "::error::Could not publish system image"; exit 1; }
+          trap - EXIT
 
       - name: Build vendor-new.img (800 MiB ext4) from TD1A vendor
         shell: bash
         run: |
           set -Eeuo pipefail
-          OUT="$OUTPUT_DIR/vendor-new.img"
+          FINAL="$OUTPUT_DIR/vendor-new.img"
+          OUT="$OUTPUT_DIR/.vendor-new.img.building.$$"
           MNT="$RUNNER_TEMP/panther-mnt"
+          if [[ -e "$FINAL" || -e "$OUT" ]]; then
+            echo "::error::Refusing to overwrite existing $FINAL or build file $OUT"
+            exit 1
+          fi
+          trap 'set +e; for p in "$MNT/ap3a_vendor" "$MNT/td1a_vendor" "$MNT/dst"; do mountpoint -q "$p" && sudo umount "$p"; done' EXIT
           truncate -s "$VENDOR_BYTES" "$OUT"
           sudo mkfs.ext4 -F -L panther_vendor_new "$OUT"
 
@@ -249,10 +264,16 @@ jobs:
 
           sudo sync
           cleanup_vendor
-          trap - EXIT
           sudo e2fsck -fy "$OUT"
           sudo tune2fs -l "$OUT" | grep -E 'Filesystem volume name|Filesystem features|Block count|Block size'
-          stat -c 'vendor-new.img size: %s bytes' "$OUT"
+          stat -c 'vendor-new.img build size: %s bytes' "$OUT"
+          if [[ -e "$FINAL" ]]; then
+            echo "::error::Output appeared during build; keeping build at $OUT"
+            exit 1
+          fi
+          mv -n "$OUT" "$FINAL"
+          [[ -f "$FINAL" ]] || { echo "::error::Could not publish vendor image"; exit 1; }
+          trap - EXIT
 
       - name: Write merge report and checksums
         shell: bash
@@ -267,10 +288,10 @@ jobs:
             echo "system-new.img requested size: $SYSTEM_BYTES bytes"
             echo "vendor-new.img requested size: $VENDOR_BYTES bytes"
             echo
-            echo "Important: this workflow uses an additive-only AP3A overlay for system/product/system_ext."
-            echo "Existing HyperOS files are not overwritten. Vendor uses TD1A as the base and only"
-            echo "adds absent eUICC-named metadata files from AP3A etc/permissions and etc/sysconfig."
-            echo "No boot-critical images are modified. eSIM and lock-screen operation are not guaranteed."
+            echo "AP3A system overlay: absent files with eSIM/eUICC, Wi-Fi/WLAN, or lock-screen/Keyguard path/name tokens only."
+            echo "Existing HyperOS paths are preserved. Vendor uses TD1A as the base and adds only absent eUICC metadata."
+            echo "Builds use temporary output names and are published only after filesystem validation."
+            echo "Feature operation is not guaranteed; dependencies and hardware/vendor compatibility must be verified."
             echo
             ls -lh "$OUTPUT_DIR/system-new.img" "$OUTPUT_DIR/vendor-new.img"
             sha256sum "$OUTPUT_DIR/system-new.img" "$OUTPUT_DIR/vendor-new.img"
